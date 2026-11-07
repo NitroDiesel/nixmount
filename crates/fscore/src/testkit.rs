@@ -271,7 +271,8 @@ fn step(fs: &dyn Filesystem, m: &mut Model, r: &mut Rng, max_write: usize) -> Re
             let ino = resolve(fs, p)?;
             let size = m.files[&id].len() as u64;
             let off = if r.below(2) == 0 { size } else { r.below(size + (1 << 18)) };
-            let data = bytes(r, r_size(r, max_write));
+            let want = r_size(r, max_write);
+            let data = bytes(r, want);
             match fs.write(ino, off, &data) {
                 Ok(n) => {
                     let f = m.files.get_mut(&id).unwrap();
