@@ -88,9 +88,10 @@ jobs:
       - name: Linux mounts them
         run: |
           mkdir m
+          # Windows wrote these, so their lines end in CRLF.
           sudo mount -o loop,ro -t ext4 e2e/ext4-default.img m
-          test "$(tr -d "" < m/e2e/renamed.txt)" = "content 1"
+          test "$(tr -d '' < m/e2e/renamed.txt)" = "content 1"
           sudo umount m
           sudo mount -o loop,ro -t btrfs e2e/btrfs-default.img m
-          test "$(tr -d "" < m/e2e/renamed.txt)" = "content 1"
+          test "$(tr -d '' < m/e2e/renamed.txt)" = "content 1"
           sudo umount m
