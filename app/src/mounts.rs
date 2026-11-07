@@ -1,8 +1,7 @@
 //! Running mounts: the registry the service owns, plus the periodic commit.
-use crate::disk::RawDev;
 use crate::volumes::{self, Target, Volume};
 use crate::winfsp::{HostOptions, Mount, Stats};
-use fscore::{CheckReport, Filesystem, FsError, MountOpts};
+use fscore::{BlockDev, CheckReport, Filesystem, MountOpts};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
@@ -43,6 +42,7 @@ pub struct MountStatus {
 struct Entry {
     target: Target,
     fs: Arc<dyn Filesystem>,
+    devs: Vec<Arc<dyn BlockDev>>,
     mount: Mount,
     stats: Arc<Stats>,
 }
@@ -74,7 +74,7 @@ impl Mounts {
             r.mount_point.clone()
         };
         let opts = MountOpts { write: r.write, cache_bytes: 0 };
-        let fs = volumes::open(&r.target, opts).map_err(|e| e.to_string())?;
+        let (fs, devs) = volumes::open_with_devices(&r.target, opts).map_err(|e| e.to_string())?;
         let host = HostOptions {
             read_only: !r.write,
             hide_dotfiles: r.hide_dotfiles,
@@ -85,7 +85,7 @@ impl Mounts {
         };
         let mount = Mount::start(fs.clone(), &point, host)?;
         let stats = mount.stats.clone();
-        let e = Entry { target: r.target, fs, mount, stats };
+        let e = Entry { target: r.target, fs, devs, mount, stats };
         let status = status_of(&e);
         self.lock().push(e);
         Ok(status)
@@ -114,12 +114,15 @@ impl Mounts {
         }
     }
 
-    /// Drops mounts whose device was unplugged, freeing their drive letters.
+    /// Drops mounts whose device has gone, freeing their drive letters. It asks the open
+    /// handle, because a disk pulled and put straight back has its path again while this
+    /// handle stays dead, and only mounting afresh gets a working one.
     pub fn prune_missing(&self) {
-        let gone: Vec<String> =
-            self.lock().iter().filter(|e| !present(&e.target)).map(|e| e.mount.mount_point.clone()).collect();
-        for point in gone {
-            let _ = self.unmount(&point);
+        let open: Vec<_> = self.lock().iter().map(|e| (e.mount.mount_point.clone(), e.devs.clone())).collect();
+        for (point, devs) in open {
+            if devs.iter().any(|d| d.read_at(0, &mut [0; 512]).is_err()) {
+                let _ = self.unmount(&point);
+            }
         }
     }
 
@@ -130,6 +133,10 @@ impl Mounts {
 
     pub fn status(&self) -> Vec<MountStatus> {
         self.lock().iter().map(status_of).collect()
+    }
+
+    pub fn uuid_at(&self, point: &str) -> Option<String> {
+        self.find(point).ok().map(|fs| fs.info().uuid)
     }
 
     pub fn sync_all(&self) -> Result<(), String> {
@@ -181,20 +188,6 @@ impl Mounts {
                 let _ = fs.sync();
             }
         });
-    }
-}
-
-/// False only when the device is really gone. A partition this process has locked for
-/// writing fails to open too, but with an access error rather than not-found.
-fn present(t: &Target) -> bool {
-    let attached = |disk: u32, part: u32| match RawDev::open(disk, part, false) {
-        Err(FsError::Io(e)) => !matches!(e.raw_os_error(), Some(2 | 3)),
-        _ => true,
-    };
-    match t {
-        Target::Image { path, .. } => path.exists(),
-        Target::Partition { disk, part } => attached(*disk, *part),
-        Target::Group { members } => members.iter().all(|m| attached(m.0, m.1)),
     }
 }
 

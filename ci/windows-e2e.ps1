@@ -108,11 +108,14 @@ Check 'read-only mount left the image untouched' ($before -eq (Get-FileHash $img
 # Raw partition access, the real-disk path, on a virtual disk so nothing real is touched.
 # A fixed VHD is a plain disk image, so the filesystem can be placed with ordinary file I/O.
 $vhd = "$Out\disk.vhd"
+$other = "$Out\other.vhd"
 $create = "$Out\create.txt"
-# A run that stopped early can leave its disk behind.
-if (Test-Path $vhd) {
-    Dismount-DiskImage -ImagePath $vhd -ErrorAction SilentlyContinue | Out-Null
-    Remove-Item $vhd
+# A run that stopped early can leave its disks behind.
+foreach ($leftover in $vhd, $other) {
+    if (Test-Path $leftover) {
+        Dismount-DiskImage -ImagePath $leftover -ErrorAction SilentlyContinue | Out-Null
+        Remove-Item $leftover
+    }
 }
 "create vdisk file=`"$vhd`" maximum=64 type=fixed`nselect vdisk file=`"$vhd`"`nattach vdisk`nconvert mbr`ncreate partition primary id=83`ndetach vdisk" |
     Set-Content $create -Encoding ascii
@@ -144,14 +147,39 @@ try {
     NixMount unmount 'J:'
 
     # Hotplug: a remembered volume mounts itself on arrival, and unplugging frees the letter.
-    NixMount automount on "${disk}:${part}" 'J:'
+    NixMount automount on "${disk}:${part}" 'J:' --rw
     Dismount-DiskImage -ImagePath $vhd | Out-Null
     Mount-DiskImage -ImagePath $vhd -NoDriveLetter | Out-Null
     Check 'a remembered volume mounts itself when plugged in' (Wait-For { Test-Path 'J:\hello.txt' })
+    foreach ($round in 1..3) {
+        Dismount-DiskImage -ImagePath $vhd | Out-Null
+        Check "unplugging frees the drive letter ($round)" (Wait-For { -not (Test-Path 'J:\') })
+        Mount-DiskImage -ImagePath $vhd -NoDriveLetter | Out-Null
+        Check "plugging back in mounts it again ($round)" (Wait-For { Test-Path 'J:\hello.txt' })
+    }
+
+    # Pulled and put straight back, the path returns but the mount's handle stays dead.
     Dismount-DiskImage -ImagePath $vhd | Out-Null
-    Check 'unplugging a mounted volume frees its drive letter' (Wait-For { -not (Test-Path 'J:\') })
     Mount-DiskImage -ImagePath $vhd -NoDriveLetter | Out-Null
-    [void](Wait-For { Test-Path 'J:\hello.txt' })
+    Check 'a disk pulled and put straight back can be written' (Wait-For {
+        try { Set-Content 'J:\replugged.txt' 'written after a fast replug'; NixMount sync; $true } catch { $false }
+    })
+    NixMount unmount 'J:'
+
+    # Any arriving disk wakes the service, and one the user detached has to stay detached.
+    "create vdisk file=`"$other`" maximum=8 type=fixed" | Set-Content $create -Encoding ascii
+    diskpart /s $create | Out-Null
+    Mount-DiskImage -ImagePath $other -NoDriveLetter | Out-Null
+    Start-Sleep -Seconds 5
+    Check 'another disk arriving leaves an unmounted volume alone' (-not (Test-Path 'J:\'))
+    Dismount-DiskImage -ImagePath $other | Out-Null
+    Remove-Item $other
+
+    # Pulling the disk ends that: it is a fresh arrival next time.
+    Dismount-DiskImage -ImagePath $vhd | Out-Null
+    Start-Sleep -Seconds 4
+    Mount-DiskImage -ImagePath $vhd -NoDriveLetter | Out-Null
+    Check 'a dismissed volume mounts again after a real unplug' (Wait-For { Test-Path 'J:\hello.txt' })
     $disk = (Get-DiskImage -ImagePath $vhd).Number
     NixMount unmount 'J:'
     "step: automount off"

@@ -73,13 +73,19 @@ fn image_slice(file: Arc<dyn BlockDev>, partition: Option<u32>) -> Result<Arc<dy
 /// Opens a volume with the engine its signature calls for. Devices are opened read-only
 /// unless writing was requested, so a read-only mount cannot write even by accident.
 pub fn open(target: &Target, opts: MountOpts) -> Result<Arc<dyn Filesystem>> {
+    open_with_devices(target, opts).map(|(fs, _)| fs)
+}
+
+/// Also hands back the devices, so a mount can tell when they stop answering.
+pub fn open_with_devices(target: &Target, opts: MountOpts) -> Result<(Arc<dyn Filesystem>, Vec<Arc<dyn BlockDev>>)> {
     let devs = devices(target, opts.write)?;
     let Some(first) = devs.first() else { return Err(FsError::Invalid("no devices")) };
-    match part::probe(first.as_ref()) {
-        FsKind::Ext(_) => Ok(Arc::new(Ext4::open(first.clone(), opts)?)),
-        FsKind::Btrfs => Ok(Arc::new(Btrfs::open(devs, opts)?)),
-        k => Err(FsError::Unsupported(format!("{} volumes can't be mounted", k.name()))),
-    }
+    let fs: Arc<dyn Filesystem> = match part::probe(first.as_ref()) {
+        FsKind::Ext(_) => Arc::new(Ext4::open(first.clone(), opts)?),
+        FsKind::Btrfs => Arc::new(Btrfs::open(devs.clone(), opts)?),
+        k => return Err(FsError::Unsupported(format!("{} volumes can't be mounted", k.name()))),
+    };
+    Ok((fs, devs))
 }
 
 fn enrich(v: &mut Volume) {

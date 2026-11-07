@@ -31,7 +31,8 @@ Linux recovers the volume from its journal next time.
 To mount a disk image, select **Add image**. Images with a partition table work too.
 
 **Mount automatically** remembers the volume by its UUID, and mounts it at startup and whenever
-it is plugged in.
+it is plugged in. If you unmount it yourself, it stays unmounted until you unplug it or restart
+Windows.
 
 ## Write to a volume
 

@@ -4,6 +4,7 @@ use crate::config::{Automount, Config};
 use crate::ipc::{self, Request, Response, ScrubState};
 use crate::mounts::Mounts;
 use crate::volumes;
+use std::collections::BTreeSet;
 use std::ptr::{null, null_mut};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -76,11 +77,18 @@ fn device_changed() {
         return;
     }
     std::thread::spawn(|| {
-        std::thread::sleep(std::time::Duration::from_secs(2));
-        PENDING.store(false, Ordering::Release);
-        if let Some(s) = STATE.get() {
+        // Partitions appear some time after their disk, with no event of their own, and a
+        // slow USB drive can take seconds. So look again until everything has turned up.
+        for (i, seconds) in [2, 3, 5, 10].into_iter().enumerate() {
+            std::thread::sleep(std::time::Duration::from_secs(seconds));
+            if i == 0 {
+                PENDING.store(false, Ordering::Release);
+            }
+            let Some(s) = STATE.get() else { return };
             s.mounts.prune_missing();
-            automount(&s.mounts);
+            if automount(&s.mounts) {
+                return;
+            }
         }
     });
 }
@@ -108,28 +116,54 @@ unsafe extern "system" fn service_main(_argc: u32, _argv: *mut *mut u16) {
     watch_devices(h);
     set_state(SERVICE_RUNNING, SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_PRESHUTDOWN);
     // Scanning disks can take a while, and the service manager shouldn't wait for it.
-    std::thread::spawn(move || automount(&mounts));
+    std::thread::spawn(move || {
+        automount(&mounts);
+    });
     let _ = ipc::serve(handle);
     set_state(SERVICE_STOPPED, 0);
 }
 
-/// Mounts remembered volumes that are present.
-fn automount(mounts: &Mounts) {
+/// Volumes the user unmounted by hand. Every disk that arrives runs automount, and that
+/// shouldn't bring back a volume someone just detached. Unplugging the volume clears it.
+static DISMISSED: Mutex<BTreeSet<String>> = Mutex::new(BTreeSet::new());
+
+fn dismissed() -> std::sync::MutexGuard<'static, BTreeSet<String>> {
+    DISMISSED.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Mounts remembered volumes that are present. Returns false if one isn't there yet or
+/// wouldn't mount, which is worth another look once the disk has settled.
+fn automount(mounts: &Mounts) -> bool {
+    // Overlapping device events must not mount one volume twice.
+    static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
+    let _turn = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
     let cfg = Config::load();
     if cfg.automounts.is_empty() {
-        return;
+        return true;
     }
     let present = volumes::scan_disks();
+    let mounted = mounts.volumes();
+    let is_image = |a: &Automount| matches!(a.mount.target, volumes::Target::Image { .. });
+    // An image file never gets unplugged, so its dismissal lasts until the service restarts.
+    dismissed().retain(|u| {
+        present.iter().any(|v| v.uuid == *u) || cfg.automounts.iter().any(|a| a.uuid == *u && is_image(a))
+    });
+    let mut settled = true;
     for a in &cfg.automounts {
+        if dismissed().contains(&a.uuid) || mounted.iter().any(|v| v.uuid == a.uuid) {
+            continue;
+        }
         let mut req = a.mount.clone();
         // Disk numbers can change between boots; the UUID is what identifies the volume.
         if let Some(v) = present.iter().find(|v| v.uuid == a.uuid) {
             req.target = v.target.clone();
-        } else if !matches!(req.target, volumes::Target::Image { .. }) {
+        } else if !is_image(a) {
+            settled = false;
             continue;
         }
-        let _ = mounts.mount(req);
+        settled &= mounts.mount(req).is_ok();
     }
+    settled
 }
 
 fn handle(r: Request) -> Response {
@@ -164,7 +198,14 @@ fn handle(r: Request) -> Response {
             Response::Volume(Box::new(v))
         }
         Request::Mount(m) => s.mounts.mount(m).map_or_else(Response::Error, Response::Mounted),
-        Request::Unmount { point } => done(s.mounts.unmount(&point)),
+        Request::Unmount { point } => {
+            let uuid = s.mounts.uuid_at(&point);
+            let result = s.mounts.unmount(&point);
+            if let (Ok(()), Some(u)) = (&result, uuid) {
+                dismissed().insert(u);
+            }
+            done(result)
+        }
         Request::Sync => done(s.mounts.sync_all()),
         Request::Scrub { point } => start_scrub(s, point),
         Request::ScrubProgress => Response::Scrub(s.scrub.lock().unwrap_or_else(|e| e.into_inner()).clone()),
@@ -174,6 +215,7 @@ fn handle(r: Request) -> Response {
         Request::SetAutomount { uuid, mount } => {
             let mut c = Config::load();
             c.automounts.retain(|a| a.uuid != uuid);
+            dismissed().remove(&uuid);
             if let Some(mount) = mount {
                 c.automounts.push(Automount { uuid, mount });
             }
