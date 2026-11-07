@@ -78,13 +78,7 @@ fn ensure_winfsp(dir: &Path) -> Result<(), String> {
     }
     let msi = dir.join("winfsp.msi");
     std::fs::write(&msi, WINFSP_MSI).map_err(|e| format!("could not unpack the driver: {e}"))?;
-    let status = Command::new(system_dir().join("msiexec.exe"))
-        .args(["/i"])
-        .arg(&msi)
-        .args(["/qn", "/norestart"])
-        .status()
-        .map_err(|e| format!("could not run Windows Installer: {e}"))?;
-    match status.code() {
+    match run_msi("/i", &msi)? {
         // Success, and success with a restart pending.
         Some(0 | 1641 | 3010) => Ok(()),
         Some(1618) => Err("another installation is running, wait for it to finish and try again".into()),
@@ -92,6 +86,30 @@ fn ensure_winfsp(dir: &Path) -> Result<(), String> {
             let _ = std::fs::remove_file(&msi);
             Err(format!("the WinFsp driver failed to install (code {code:?})"))
         }
+    }
+}
+
+/// Runs Windows Installer quietly. Its Restart Manager would otherwise close whatever holds a
+/// file it is replacing, and for a console program that means a Ctrl-C to the whole console,
+/// including whoever ran this. Disabled, a locked file just finishes at the next restart.
+fn run_msi(action: &str, msi: &Path) -> Result<Option<i32>, String> {
+    let mut cmd = Command::new(system_dir().join("msiexec.exe"));
+    cmd.arg(action).arg(msi).args(["/qn", "/norestart", "MSIRESTARTMANAGERCONTROL=Disable"]);
+    if let Some(log) = std::env::var_os("NIXMOUNT_MSI_LOG") {
+        cmd.arg("/l*v").arg(log);
+    }
+    cmd.status().map(|s| s.code()).map_err(|e| format!("could not run Windows Installer: {e}"))
+}
+
+/// Waits for the service's process to end. It reports itself stopped slightly before that,
+/// and until then it holds the program file and the driver's DLL.
+fn wait_for_release(exe: &Path) {
+    for _ in 0..50 {
+        let free = std::fs::OpenOptions::new().write(true).open(exe);
+        if free.is_ok() || !exe.exists() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
     }
 }
 
@@ -190,16 +208,16 @@ pub fn uninstall() -> Result<(), String> {
     let key = wide(UNINSTALL_KEY);
     // SAFETY: `key` is NUL-terminated.
     unsafe { RegDeleteKeyW(HKEY_LOCAL_MACHINE, key.as_ptr()) };
+    let this = std::env::current_exe().map_err(|e| e.to_string())?;
+    let dest = dir.join("nixmount.exe");
+    if this != dest {
+        wait_for_release(&dest);
+    }
     let msi = dir.join("winfsp.msi");
     if msi.exists() {
-        let status = Command::new(system_dir().join("msiexec.exe"))
-            .args(["/x"])
-            .arg(&msi)
-            .args(["/qn", "/norestart"])
-            .status()
-            .map_err(|e| format!("could not run Windows Installer: {e}"))?;
-        if !matches!(status.code(), Some(0 | 1605 | 1641 | 3010)) {
-            return Err(format!("the WinFsp driver could not be removed (code {:?})", status.code()));
+        let code = run_msi("/x", &msi)?;
+        if !matches!(code, Some(0 | 1605 | 1641 | 3010)) {
+            return Err(format!("the WinFsp driver could not be removed (code {code:?})"));
         }
         let _ = std::fs::remove_file(&msi);
     }

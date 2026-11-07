@@ -45,6 +45,8 @@ jobs:
       - run: cargo test -p fscore -p ext4 -p btrfs -p nixmount
       - name: End to end through the real service and WinFsp
         shell: pwsh
+        env:
+          NIXMOUNT_MSI_LOG: ${{ github.workspace }}e2emsi.log
         run: ci/windows-e2e.ps1 -Exe (Resolve-Path target/release/nixmount.exe).Path -Out e2e
       - name: The bundled installer is the official, unmodified release
         shell: pwsh
@@ -59,7 +61,9 @@ jobs:
         if: always()
         with:
           name: e2e-images
-          path: e2e/*.img
+          path: |
+            e2e/*.img
+            e2e/msi.log
           retention-days: 3
 
   # What Windows wrote through the whole stack, judged by the real Linux tools.
