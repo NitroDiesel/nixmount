@@ -1,3 +1,4 @@
+#![cfg(unix)]
 //! Judges the engine against the real tools. Needs `mke2fs`/`e2fsck`, so it runs on the
 //! Linux CI job; elsewhere each test skips. Images and the expected trees are left in
 //! `$CAUSEWAY_OUT` for `ci/kernel-check.sh`, which has the Linux kernel read them.
