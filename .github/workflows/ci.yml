@@ -21,7 +21,7 @@ jobs:
         run: cargo test --profile ci-test -p ext4 -p btrfs -p fscore -- --nocapture --test-threads=4
       - name: Linux kernel reads what the engines wrote
         run: bash ci/kernel-check.sh "$CAUSEWAY_OUT"
-      - name: Kernel-made images: dirty journals, compression, shared snapshots
+      - name: Kernel-made images (dirty journals, compression, shared snapshots)
         run: |
           cargo test --profile ci-test -p ext4 --test dirty -- --nocapture
           cargo test --profile ci-test -p btrfs --test kernel -- --nocapture
