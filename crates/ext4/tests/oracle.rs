@@ -217,7 +217,8 @@ fn power_loss() {
 
         let dev = Arc::new(CrashDev::new(base));
         let fs = Ext4::open(dev.clone(), RW).unwrap();
-        let mut model = Model::from_tree(&walk(&fs).unwrap());
+        let initial = walk(&fs).unwrap();
+        let mut model = Model::from_tree(&initial);
         let mut rng = Rng(77);
         let mut synced: Vec<(usize, Tree)> = vec![];
         for _ in 0..12 {
@@ -243,17 +244,19 @@ fn power_loss() {
             let fs = Ext4::open(mem.clone(), RW).unwrap_or_else(|e| panic!("{tag} cut {cut}: mount: {e}"));
             let got = walk(&fs).unwrap_or_else(|e| panic!("{tag} cut {cut}: walk: {e}"));
             assert_same(&got, &seen, &format!("{tag} cut {cut}: replay vs overlay"));
+            // Recovery lands on a commit boundary: the last completed sync or the next.
+            let i = synced.iter().rposition(|(at, _)| *at <= cut);
+            let names = |t: &Tree| t.keys().cloned().collect::<Vec<_>>();
+            let have = names(&got);
+            let older = i.map_or(names(&initial), |i| names(&synced[i].1));
+            let newer = synced.get(i.map_or(0, |i| i + 1)).map(|s| names(&s.1));
+            assert!(
+                have == older || Some(&have) == newer.as_ref(),
+                "{tag} cut {cut}: recovered tree is neither the last sync nor the next"
+            );
             fs.unmount().unwrap();
             drop(fs);
 
-            // Whatever a completed sync promised must have survived.
-            if let Some((_, want)) = synced.iter().rev().find(|(at, _)| *at <= cut) {
-                for (p, c) in want {
-                    if let Content::Dir = c {
-                        assert!(got.contains_key(p), "{tag} cut {cut}: synced directory {p} lost");
-                    }
-                }
-            }
             let path = out.join(format!("{tag}.cut.img"));
             std::fs::write(&path, mem.snapshot()).unwrap();
             fsck(&path, &format!("{tag} cut {cut}"));

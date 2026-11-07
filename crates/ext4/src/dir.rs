@@ -646,6 +646,15 @@ impl Fs {
         Err(FsError::NotFound)
     }
 
+    /// A directory's parent. `..` is read in place: in an htree directory it sits in the
+    /// root block, where a hashed lookup would never find it.
+    pub fn dir_parent(&self, dir: u32, raw: &[u8]) -> Result<u32> {
+        if self.is_inline(raw) {
+            return Ok(raw.u32_at(I_BLOCK));
+        }
+        Ok(self.block(self.dir_phys(dir, raw, 0)?)?.u32_at(12))
+    }
+
     /// Points a directory's `..` at a new parent.
     pub fn dir_set_parent(&mut self, dir: u32, raw: &[u8], parent: u32) -> Result<()> {
         let p = self.dir_phys(dir, raw, 0)?;

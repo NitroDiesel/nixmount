@@ -213,10 +213,7 @@ impl Fs {
                 return Ok(());
             }
             let raw = self.inode(cur)?;
-            match self.dir_lookup(cur, &raw, b"..")? {
-                Some(e) => cur = e.ino,
-                None => return corrupt("directory has no parent entry"),
-            }
+            cur = self.dir_parent(cur, &raw)?;
         }
         corrupt("directory tree is too deep or has a cycle")
     }

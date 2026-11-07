@@ -1,8 +1,19 @@
 [package]
 name = "btrfs"
+description = "Memory-safe Btrfs engine: multi-device, RAID, compression, copy-on-write transactions"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
 fscore = { path = "../fscore" }
+crc32c = "0.6"
+sha2 = "0.10"
+blake2 = "0.10"
+xxhash-rust = { version = "0.8", features = ["xxh64"] }
+miniz_oxide = "0.8"
+ruzstd = "0.8"
+
+[dev-dependencies]
+flate2 = "1"
+fscore = { path = "../fscore", features = ["testkit"] }
