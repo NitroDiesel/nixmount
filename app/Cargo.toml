@@ -1,0 +1,10 @@
+[package]
+name = "causeway"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+fscore = { path = "../crates/fscore" }
+ext4 = { path = "../crates/ext4" }
+btrfs = { path = "../crates/btrfs" }

@@ -1,0 +1,26 @@
+[workspace]
+resolver = "2"
+members = ["crates/fscore", "crates/ext4", "crates/btrfs", "app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-or-later"
+repository = "https://github.com/NitroDiesel/causeway"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "unwind"   # panics are contained at the WinFsp FFI boundary
+strip = true
+
+[profile.dev]
+opt-level = 1
+
+# Optimised, but keeps overflow and debug assertions on so tests catch arithmetic bugs.
+[profile.ci-test]
+inherits = "dev"
+opt-level = 2
+debug-assertions = true
+overflow-checks = true

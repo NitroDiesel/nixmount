@@ -1,0 +1,52 @@
+name: ci
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  CAUSEWAY_OUT: ${{ github.workspace }}/oracle
+
+jobs:
+  # The engines are platform-independent, so Linux can judge them with real tools.
+  oracle:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y e2fsprogs btrfs-progs
+      - run: mke2fs -V; btrfs --version; uname -r
+      - name: Engines vs e2fsck / btrfs check
+        run: cargo test --profile ci-test -p ext4 -p btrfs -p fscore -- --nocapture --test-threads=4
+      - name: Linux kernel reads what the engines wrote
+        run: bash ci/kernel-check.sh "$CAUSEWAY_OUT"
+      - name: Replay a journal the kernel left dirty
+        run: cargo test --profile ci-test -p ext4 --test dirty -- --nocapture
+      - name: Publish fixture images
+        if: always()
+        run: |
+          mkdir -p fixtures
+          for f in ext4-default ext4-1k-nocsum ext3-1k ext2-2k ext4-inline; do
+            [ -f "$CAUSEWAY_OUT/$f.img" ] && gzip -9c "$CAUSEWAY_OUT/$f.img" > "fixtures/$f.img.gz"
+          done
+          ls -la fixtures
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: fixtures
+          path: fixtures
+          retention-days: 7
+
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release --locked -p causeway
+      - run: cargo test -p fscore -p ext4 -p btrfs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: causeway-windows-x64
+          path: target/release/causeway.exe

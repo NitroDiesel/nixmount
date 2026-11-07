@@ -1,0 +1,12 @@
+[package]
+name = "fscore"
+description = "Block devices, partition and filesystem detection, and the VFS contract shared by the Causeway engines"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+crc32c = "0.6"
+
+[features]
+testkit = []

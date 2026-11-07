@@ -1,0 +1,13 @@
+[package]
+name = "ext4"
+description = "Memory-safe ext2/ext3/ext4 engine with real jbd2 journaling"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+fscore = { path = "../fscore" }
+
+[dev-dependencies]
+flate2 = "1"
+fscore = { path = "../fscore", features = ["testkit"] }
