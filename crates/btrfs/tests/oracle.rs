@@ -303,6 +303,12 @@ fn snapshots_stay_independent() {
     }
     assert_same(&view(frozen), &original, "frozen after churn");
     assert!(matches!(fs.write(fs.lookup(frozen, b"hello.txt").unwrap(), 0, b"x"), Err(fscore::FsError::ReadOnly)));
+
+    // Deleting is the way back out. The kernel cleaner finishes the job in kernel-check.sh.
+    fs.delete_subvolume(root, b"snap").unwrap();
+    assert!(matches!(fs.lookup(root, b"snap"), Err(fscore::FsError::NotFound)));
+    let left: Vec<Vec<u8>> = fs.subvolumes(root).unwrap().into_iter().map(|s| s.name).collect();
+    assert_eq!(left.len(), 2, "{left:?}");
     fs.unmount().unwrap();
     drop(fs);
     check(&imgs[0], tag);

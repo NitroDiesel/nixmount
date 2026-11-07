@@ -23,7 +23,7 @@ pub struct MountRequest {
     pub gid: Option<u32>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MountStatus {
     pub target: Target,
     pub mount_point: String,
@@ -36,6 +36,8 @@ pub struct MountStatus {
     pub writes: u64,
     pub read_bytes: u64,
     pub written_bytes: u64,
+    /// Name and read-only flag of each subvolume at the top of the volume.
+    pub subvolumes: Vec<(String, bool)>,
 }
 
 struct Entry {
@@ -163,6 +165,11 @@ impl Mounts {
         fs.create_subvolume(fs.root(), name.as_bytes()).map(|_| ()).map_err(|e| e.to_string())
     }
 
+    pub fn delete_subvolume(&self, point: &str, name: &str) -> Result<(), String> {
+        let fs = self.find(point)?;
+        fs.delete_subvolume(fs.root(), name.as_bytes()).map_err(|e| e.to_string())
+    }
+
     /// Commits on a timer. Errors are ignored here: a failing engine has already
     /// switched itself to read-only and says so in its status.
     pub fn spawn_committer(self: &Arc<Self>) {
@@ -205,5 +212,12 @@ fn status_of(e: &Entry) -> MountStatus {
         writes: e.stats.writes.load(Ordering::Relaxed),
         read_bytes: e.stats.read_bytes.load(Ordering::Relaxed),
         written_bytes: e.stats.written_bytes.load(Ordering::Relaxed),
+        subvolumes: e
+            .fs
+            .subvolumes(e.fs.root())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|s| (String::from_utf8_lossy(&s.name).into_owned(), s.read_only))
+            .collect(),
     }
 }

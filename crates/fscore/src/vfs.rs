@@ -163,6 +163,14 @@ pub struct MountOpts {
     pub cache_bytes: usize,
 }
 
+/// A Btrfs subvolume or snapshot linked into a directory.
+#[derive(Clone, Debug)]
+pub struct Subvolume {
+    pub id: u64,
+    pub name: Vec<u8>,
+    pub read_only: bool,
+}
+
 /// The result of a checksum verification pass.
 #[derive(Clone, Debug, Default)]
 pub struct CheckReport {
@@ -208,6 +216,13 @@ pub trait Filesystem: Send + Sync {
     }
     fn snapshot(&self, _src: Ino, _dir: Ino, _name: &[u8], _read_only: bool) -> Result<Ino> {
         Err(FsError::Unsupported("this filesystem has no snapshots".into()))
+    }
+    fn subvolumes(&self, _dir: Ino) -> Result<Vec<Subvolume>> {
+        Ok(vec![])
+    }
+    /// Removes a subvolume and everything in it.
+    fn delete_subvolume(&self, _dir: Ino, _name: &[u8]) -> Result<()> {
+        Err(FsError::Unsupported("this filesystem has no subvolumes".into()))
     }
 }
 

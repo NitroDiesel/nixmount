@@ -22,6 +22,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 const WM_WORKER: u32 = WM_APP + 1;
 const TIMER_STATUS: usize = 1;
+const TIMER_POLL: usize = 2;
 const WM_MOUSELEAVE: u32 = 0x02A3;
 
 const I_DISK: &str = "\u{EDA2}";
@@ -102,6 +103,7 @@ enum Act {
     ToggleAuto,
     Scrub,
     Snapshot,
+    DeleteSubvolume(String),
     Browse,
     CloseBrowser,
     BrowseUp,
@@ -377,6 +379,16 @@ impl App {
                 let req = Request::Snapshot { point: m.mount_point.clone(), name, read_only: true };
                 self.request("Creating snapshot…", req, Some(note));
             }
+            Act::DeleteSubvolume(name) => {
+                let Some(m) = self.current().and_then(|v| self.mount_of(v)) else { return };
+                let point = m.mount_point.clone();
+                let text = format!("Delete {name} and everything in it? This can't be undone.");
+                if self.confirm("Delete this subvolume?", &text) {
+                    let req = Request::DeleteSubvolume { point, name: name.clone() };
+                    let note = format!("Deleted {name}. Linux reclaims the space on its next read-write mount.");
+                    self.request("Deleting…", req, Some(note));
+                }
+            }
             Act::Browse => self.open_browser(),
             Act::CloseBrowser => self.browser = None,
             Act::BrowseUp => {
@@ -543,6 +555,20 @@ impl App {
     fn receive(&mut self, m: Msg) {
         match m {
             Msg::Status { mounts, autos, winfsp } => {
+                let changed = mounts != self.mounts
+                    || autos != self.autos
+                    || winfsp != self.winfsp
+                    || self.service != Service::Ready;
+                // Counters only move while something is mounted, so only then is it worth
+                // asking; an idle window with nothing mounted stays completely quiet.
+                // SAFETY: the window is alive.
+                unsafe {
+                    if mounts.is_empty() {
+                        KillTimer(self.hwnd, TIMER_POLL);
+                    } else {
+                        SetTimer(self.hwnd, TIMER_POLL, 2000, None);
+                    }
+                }
                 self.mounts = mounts;
                 self.autos = autos;
                 self.winfsp = winfsp;
@@ -550,6 +576,9 @@ impl App {
                 if !self.scanned {
                     self.scanned = true;
                     self.scan();
+                }
+                if !changed {
+                    return;
                 }
             }
             Msg::NoService => {
@@ -1048,7 +1077,20 @@ impl App {
             fact(self, "Activity", &s);
         }
         ay += self.canvas.px(4.0);
-        self.chips(about.x + pad, ay, col - pad * 2, &v.features);
+        self.chips(about.x + pad, ay, col - pad * 2, &v.features, false);
+
+        // Snapshots get their own card: this is the way back out of creating them.
+        let Some(subvols) = mounted.as_ref().map(|m| &m.subvolumes).filter(|s| !s.is_empty()) else { return };
+        let names: Vec<String> = subvols.iter().map(|s| s.0.clone()).collect();
+        let sy = about.bottom() + gap;
+        let rows = self.chip_rows(&names, r.w - pad * 2);
+        let card = Rect::new(r.x, sy, r.w, self.canvas.px(70.0) + rows * self.canvas.px(30.0));
+        self.canvas.card(card, radius, t.card, t.line);
+        let tr = Rect::new(card.x + pad, sy + self.canvas.px(12.0), r.w - pad * 2, self.canvas.px(22.0));
+        self.canvas.text(tr, "Snapshots and subvolumes", Font::Strong, t.text, false);
+        let hr = Rect::new(tr.x, tr.bottom(), tr.w, self.canvas.px(18.0));
+        self.canvas.text(hr, "Click one to delete it", Font::Small, t.muted, false);
+        self.chips(card.x + pad, hr.bottom() + self.canvas.px(6.0), r.w - pad * 2, &names, true);
     }
 
     /// How many rows `chips` needs at this width.
@@ -1065,8 +1107,8 @@ impl App {
         rows
     }
 
-    /// Feature tags that wrap within `width`.
-    fn chips(&mut self, x0: i32, y0: i32, width: i32, items: &[String]) {
+    /// Tags that wrap within `width`; `deletable` ones are buttons.
+    fn chips(&mut self, x0: i32, y0: i32, width: i32, items: &[String], deletable: bool) {
         let t = self.theme();
         let (h, gap) = (self.canvas.px(24.0), self.canvas.px(6.0));
         let (mut x, mut y) = (x0, y0);
@@ -1077,8 +1119,13 @@ impl App {
                 y += h + gap;
             }
             let c = Rect::new(x, y, w, h);
-            self.canvas.round(c, h / 2, t.track);
+            let act = Act::DeleteSubvolume(s.clone());
+            let hot = deletable && self.hover.as_ref() == Some(&act);
+            self.canvas.round(c, h / 2, if hot { t.hover } else { t.track });
             self.canvas.text(c, s, Font::Small, t.text, true);
+            if deletable {
+                self.region(c, act);
+            }
             x += w + gap;
         }
     }
@@ -1319,7 +1366,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             0
         }
         WM_TIMER => {
-            a.poll_scrub();
+            if wp == TIMER_POLL {
+                a.refresh_status();
+            } else {
+                a.poll_scrub();
+            }
             0
         }
         WM_WORKER => {
@@ -1482,6 +1533,7 @@ pub fn screenshot(path: &std::path::Path, dark: bool, scene: &str) {
             writes: 311,
             read_bytes: 1_340_000_000,
             written_bytes: 72_000_000,
+            subvolumes: vec![("@home".into(), false), ("snapshot-1731000000".into(), true)],
         }]
     } else {
         vec![]

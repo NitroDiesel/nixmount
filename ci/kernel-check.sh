@@ -79,3 +79,10 @@ sync
 sudo umount "$mnt"
 sudo losetup -d "${loops[@]}"
 sudo chown "$(id -u)" "$out"/kernel-*.image
+
+# A deleted subvolume is only orphaned by the engine. Let the kernel's cleaner drop it:
+# that walks every reference in the tree, so it also audits the engine's snapshot accounting.
+sudo mount -o loop "$out/btrfs-snap.img" "$mnt"
+sudo btrfs subvolume sync "$mnt"
+sudo umount "$mnt"
+sudo btrfs check --check-data-csum "$out/btrfs-snap.img"

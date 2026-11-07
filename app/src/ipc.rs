@@ -35,6 +35,7 @@ pub enum Request {
     ScrubProgress,
     Snapshot { point: String, name: String, read_only: bool },
     CreateSubvolume { point: String, name: String },
+    DeleteSubvolume { point: String, name: String },
     SetAutomount { uuid: String, mount: Option<MountRequest> },
 }
 

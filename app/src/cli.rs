@@ -27,7 +27,7 @@ Usage:
   causeway export <target> <path> <dest>   Copy files out without mounting
   causeway scrub <X:>             Verify checksums on a mounted volume
   causeway snapshot <X:> <name> [--read-only]    Snapshot a mounted Btrfs volume
-  causeway subvolume <X:> <name>  Create a Btrfs subvolume
+  causeway subvolume list|create|delete <X:> [name]    Manage Btrfs subvolumes and snapshots
   causeway service install|uninstall|run|debug
 
 A target is an image file (optionally file#partition) or disk:partition, e.g. 1:3.";
@@ -285,9 +285,25 @@ pub fn run(mut args: Vec<String>) -> Result<(), String> {
             let read_only = take_flag(&mut args, "--read-only");
             call(&Request::Snapshot { point: args.first().cloned().ok_or(USAGE)?, name: args.get(1).cloned().ok_or(USAGE)?, read_only })?;
         }
-        "subvolume" => {
-            call(&Request::CreateSubvolume { point: arg(0)?, name: arg(1)? })?;
-        }
+        "subvolume" => match arg(0)?.as_str() {
+            "create" => {
+                call(&Request::CreateSubvolume { point: arg(1)?, name: arg(2)? })?;
+            }
+            "delete" => {
+                call(&Request::DeleteSubvolume { point: arg(1)?, name: arg(2)? })?;
+                println!("Deleted. The space is reclaimed the next time Linux mounts the volume read-write.");
+            }
+            "list" => {
+                let point = arg(1)?;
+                if let Response::Status { mounts, .. } = call(&Request::Status)? {
+                    let m = mounts.iter().find(|m| m.mount_point.eq_ignore_ascii_case(&point));
+                    for (name, read_only) in m.ok_or("nothing is mounted there")?.subvolumes.iter() {
+                        println!("{name}{}", if *read_only { "  (read-only)" } else { "" });
+                    }
+                }
+            }
+            _ => return Err(USAGE.into()),
+        },
         "service" => match arg(0)?.as_str() {
             "install" => crate::service::install()?,
             "uninstall" => crate::service::uninstall()?,

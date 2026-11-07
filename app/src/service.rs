@@ -170,6 +170,7 @@ fn handle(r: Request) -> Response {
         Request::ScrubProgress => Response::Scrub(s.scrub.lock().unwrap_or_else(|e| e.into_inner()).clone()),
         Request::Snapshot { point, name, read_only } => done(s.mounts.snapshot(&point, &name, read_only)),
         Request::CreateSubvolume { point, name } => done(s.mounts.create_subvolume(&point, &name)),
+        Request::DeleteSubvolume { point, name } => done(s.mounts.delete_subvolume(&point, &name)),
         Request::SetAutomount { uuid, mount } => {
             let mut c = Config::load();
             c.automounts.retain(|a| a.uuid != uuid);

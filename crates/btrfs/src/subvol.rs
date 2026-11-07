@@ -2,13 +2,91 @@
 use crate::inode::*;
 use crate::tree::{level, nritems};
 use crate::*;
-use fscore::{Ino, Le, LeMut, Time};
+use fscore::{Ino, Le, LeMut, Subvolume, Time};
 use sha2::{Digest, Sha256};
 
 const ROOT_ITEM_SIZE: usize = 439;
 const RDONLY: u64 = 1;
+const ROOT_SUBVOL_DEAD: u64 = 1 << 48;
+const K_ORPHAN_ITEM: u8 = 48;
+const ORPHAN_OBJECTID: u64 = -5i64 as u64;
 
 impl Fs {
+    /// Subvolumes linked directly into `dir`.
+    pub fn list_subvols(&self, dir: Ino) -> Result<Vec<Subvolume>> {
+        let mut found = vec![];
+        self.scan(self.root_tree, Key::new(dir.tree, K_ROOT_REF, 0), &mut |k, d| {
+            if k.obj != dir.tree || k.ty != K_ROOT_REF {
+                return Ok(false);
+            }
+            let n = d.u16_at(16) as usize;
+            if d.u64_at(0) == dir.id {
+                if let Some(name) = d.get(18..18 + n) {
+                    found.push((k.off, name.to_vec()));
+                }
+            }
+            Ok(true)
+        })?;
+        found
+            .into_iter()
+            .map(|(id, name)| {
+                let read_only = self.root_item(id)?.1.u64_at(208) & RDONLY != 0;
+                Ok(Subvolume { id, name, read_only })
+            })
+            .collect()
+    }
+
+    /// Unlinks a subvolume and marks its tree for cleanup. As on Linux, the blocks are
+    /// reclaimed afterwards by a cleaner: the next read-write mount under Linux does that
+    /// work, and until then the space stays allocated but the volume stays consistent.
+    pub fn op_delete_subvol(&mut self, dir: Ino, name: &[u8]) -> Result<()> {
+        self.check_writable_tree(dir.tree)?;
+        let tree = self.tree(dir.tree)?;
+        let key = Key::new(dir.id, K_DIR_ITEM, name_hash(name));
+        let Some(raw) = self.get(tree, key)? else { return Err(FsError::NotFound) };
+        let Some(e) = parse_dir_items(&raw)?.into_iter().find(|e| e.name == name) else {
+            return Err(FsError::NotFound);
+        };
+        if e.location.ty != K_ROOT_ITEM {
+            return Err(FsError::Invalid("not a subvolume"));
+        }
+        let id = e.location.obj;
+        if id == self.default_subvol {
+            return Err(FsError::Invalid("the default subvolume can't be deleted"));
+        }
+        let mut nested = false;
+        self.scan(self.root_tree, Key::new(id, K_ROOT_REF, 0), &mut |k, _| {
+            nested = k.obj == id && k.ty == K_ROOT_REF;
+            Ok(false)
+        })?;
+        if nested {
+            return Err(FsError::NotEmpty);
+        }
+        let forward = Key::new(dir.tree, K_ROOT_REF, id);
+        let Some(link) = self.get(self.root_tree, forward)? else { return Err(FsError::NotFound) };
+        let (root_key, item) = self.root_item(id)?;
+
+        self.remove_dir_entries(dir, name, link.u64_at(8))?;
+        self.delete_item(ROOT_TREE, forward)?;
+        self.delete_item(ROOT_TREE, Key::new(id, K_ROOT_BACKREF, dir.tree))?;
+        let mut parent = self.inode_item(dir)?;
+        self.bump_dir(&mut parent, -2 * name.len() as i64);
+        self.write_inode(dir, &parent)?;
+        if self.root_item(UUID_TREE).is_ok() {
+            let uuid = &item[247..263];
+            let k = Key::new(uuid.u64_at(0), K_UUID_SUBVOL, uuid.u64_at(8));
+            if self.get(self.tree(UUID_TREE)?, k)?.is_some() {
+                self.delete_item(UUID_TREE, k)?;
+            }
+        }
+        self.update_item(ROOT_TREE, root_key, |d| {
+            let flags = d.u64_at(208) | ROOT_SUBVOL_DEAD;
+            d.put_u64(208, flags);
+            d.put_u32(216, 0);
+        })?;
+        self.insert_item(ROOT_TREE, Key::new(ORPHAN_OBJECTID, K_ORPHAN_ITEM, id), &[])
+    }
+
     /// A fresh identifier. Uniqueness only matters within this filesystem's lifetime.
     fn new_uuid(&self, salt: u64) -> [u8; 16] {
         let now = Time::now();

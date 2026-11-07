@@ -40,7 +40,10 @@ pub fn decompress(kind: u8, src: &[u8], ram_bytes: usize, sector: usize) -> Resu
 /// never straddle a sector boundary.
 fn lzo_extent(src: &[u8], ram: usize, sector: usize) -> Result<Vec<u8>> {
     let total = (src.u32_at(0) as usize).min(src.len());
-    let mut out = Vec::with_capacity(ram);
+    // The kernel compresses whole sectors, so an inline extent of five bytes decodes to a
+    // sector of zero-padded data; the caller keeps the first `ram` bytes.
+    let cap = ram.div_ceil(sector).max(1) * sector;
+    let mut out = Vec::with_capacity(cap);
     let mut p = 4;
     while p + 4 <= total && out.len() < ram {
         if sector - p % sector < 4 {
@@ -51,7 +54,7 @@ fn lzo_extent(src: &[u8], ram: usize, sector: usize) -> Result<Vec<u8>> {
         p += 4;
         let Some(seg) = src.get(p..p + n) else { return bad("lzo") };
         let before = out.len();
-        lzo1x(seg, &mut out, ram).map_err(|_| {
+        lzo1x(seg, &mut out, cap).map_err(|_| {
             let head: Vec<String> = seg.iter().take(8).map(|b| format!("{b:02x}")).collect();
             FsError::Corrupt(format!(
                 "lzo stream is invalid: segment at {p}/{total}, {n} bytes starting {}, decoded {} of {ram} from {before}",

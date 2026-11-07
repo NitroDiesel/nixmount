@@ -6,7 +6,8 @@ use crate::inode::*;
 use crate::mount::Btrfs;
 use crate::*;
 use fscore::{
-    crc32c_raw, CheckReport, DirEntry, FileKind, Filesystem, Ino, Le, LeMut, NewNode, Owner, SetAttr, Stat, Time, VolumeInfo,
+    crc32c_raw, CheckReport, DirEntry, FileKind, Filesystem, Ino, Le, LeMut, NewNode, Owner, SetAttr, Stat, Subvolume, Time,
+    VolumeInfo,
 };
 use std::sync::{RwLockReadGuard, RwLockWriteGuard};
 
@@ -78,7 +79,7 @@ impl Fs {
         self.insert_item(dir.tree, Key::new(dir.id, K_DIR_INDEX, index), &e)
     }
 
-    fn remove_dir_entries(&mut self, dir: Ino, name: &[u8], index: u64) -> Result<()> {
+    pub fn remove_dir_entries(&mut self, dir: Ino, name: &[u8], index: u64) -> Result<()> {
         let k = Key::new(dir.id, K_DIR_ITEM, name_hash(name));
         let root = self.tree(dir.tree)?;
         let Some(d) = self.get(root, k)? else { return bad("directory entry vanished") };
@@ -169,7 +170,7 @@ impl Fs {
         self.put_item(ino.tree, k, &v)
     }
 
-    fn bump_dir(&self, item: &mut [u8], delta: i64) {
+    pub fn bump_dir(&self, item: &mut [u8], delta: i64) {
         let size = (item.u64_at(O_SIZE) as i64 + delta).max(0) as u64;
         item.put_u64(O_SIZE, size);
         let now = Time::now();
@@ -641,5 +642,13 @@ impl Filesystem for Btrfs {
 
     fn snapshot(&self, src: Ino, dir: Ino, name: &[u8], read_only: bool) -> Result<Ino> {
         self.op(0, |f| f.op_snapshot(src, dir, name, read_only))
+    }
+
+    fn subvolumes(&self, dir: Ino) -> Result<Vec<Subvolume>> {
+        self.read_lock()?.list_subvols(dir)
+    }
+
+    fn delete_subvolume(&self, dir: Ino, name: &[u8]) -> Result<()> {
+        self.op(0, |f| f.op_delete_subvol(dir, name))
     }
 }
