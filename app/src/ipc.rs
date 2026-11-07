@@ -1,0 +1,194 @@
+//! The local protocol between the interface and the service: length-prefixed JSON over
+//! a named pipe that only administrators and SYSTEM can open.
+use crate::mounts::{MountRequest, MountStatus};
+use crate::volumes::Volume;
+use serde::{Deserialize, Serialize};
+use std::ffi::c_void;
+use std::path::PathBuf;
+use std::ptr::{null, null_mut};
+use windows_sys::Win32::Foundation::{CloseHandle, LocalFree, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE};
+use windows_sys::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
+use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+use windows_sys::Win32::Storage::FileSystem::{
+    CreateFileW, ReadFile, WriteFile, FILE_FLAG_FIRST_PIPE_INSTANCE, OPEN_EXISTING, PIPE_ACCESS_DUPLEX,
+};
+use windows_sys::Win32::System::Pipes::{
+    ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE,
+    PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
+};
+
+const PIPE: &str = r"\\.\pipe\causeway";
+/// Requests are small; refusing anything large caps what a client can make us allocate.
+const MAX_MESSAGE: usize = 4 << 20;
+
+#[derive(Debug, Serialize, Deserialize)]
+pub enum Request {
+    Status,
+    Scan,
+    Inspect { path: PathBuf },
+    Mount(MountRequest),
+    Unmount { point: String },
+    Sync,
+    Scrub { point: String },
+    ScrubProgress,
+    Snapshot { point: String, name: String, read_only: bool },
+    CreateSubvolume { point: String, name: String },
+    SetAutomount { uuid: String, mount: Option<MountRequest> },
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ScrubState {
+    pub running: bool,
+    pub point: String,
+    pub done: u64,
+    pub total: u64,
+    pub scanned_bytes: u64,
+    pub repaired: u64,
+    pub errors: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub enum Response {
+    Ok,
+    Error(String),
+    Status { mounts: Vec<MountStatus>, winfsp: bool, automount_uuids: Vec<String> },
+    Volumes(Vec<Volume>),
+    Volume(Box<Volume>),
+    Mounted(MountStatus),
+    Scrub(ScrubState),
+}
+
+/// An open pipe end.
+pub struct Pipe(HANDLE);
+
+// SAFETY: a pipe handle is usable from any thread and each `Pipe` is used by one.
+unsafe impl Send for Pipe {}
+
+impl Drop for Pipe {
+    fn drop(&mut self) {
+        // SAFETY: owned handle, closed once.
+        unsafe { CloseHandle(self.0) };
+    }
+}
+
+impl Pipe {
+    fn read_exact(&self, buf: &mut [u8]) -> std::io::Result<()> {
+        let mut done = 0;
+        while done < buf.len() {
+            let mut n = 0;
+            // SAFETY: the slice is writable for the length passed.
+            let ok = unsafe { ReadFile(self.0, buf[done..].as_mut_ptr(), (buf.len() - done) as u32, &mut n, null_mut()) };
+            if ok == 0 || n == 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            done += n as usize;
+        }
+        Ok(())
+    }
+
+    fn write_all(&self, buf: &[u8]) -> std::io::Result<()> {
+        let mut done = 0;
+        while done < buf.len() {
+            let mut n = 0;
+            // SAFETY: the slice is readable for the length passed.
+            let ok = unsafe { WriteFile(self.0, buf[done..].as_ptr(), (buf.len() - done) as u32, &mut n, null_mut()) };
+            if ok == 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            done += n as usize;
+        }
+        Ok(())
+    }
+
+    pub fn send<T: Serialize>(&self, msg: &T) -> std::io::Result<()> {
+        let body = serde_json::to_vec(msg)?;
+        self.write_all(&(body.len() as u32).to_le_bytes())?;
+        self.write_all(&body)
+    }
+
+    pub fn receive<T: for<'a> Deserialize<'a>>(&self) -> std::io::Result<T> {
+        let mut len = [0u8; 4];
+        self.read_exact(&mut len)?;
+        let n = u32::from_le_bytes(len) as usize;
+        if n > MAX_MESSAGE {
+            return Err(std::io::ErrorKind::InvalidData.into());
+        }
+        let mut body = vec![0u8; n];
+        self.read_exact(&mut body)?;
+        Ok(serde_json::from_slice(&body)?)
+    }
+}
+
+/// Sends one request to the service.
+pub fn call(req: &Request) -> std::io::Result<Response> {
+    let wide: Vec<u16> = PIPE.encode_utf16().chain([0]).collect();
+    // SAFETY: `wide` is NUL-terminated.
+    let h = unsafe { CreateFileW(wide.as_ptr(), GENERIC_READ | GENERIC_WRITE, 0, null(), OPEN_EXISTING, 0, null_mut()) };
+    if h == INVALID_HANDLE_VALUE {
+        return Err(std::io::Error::last_os_error());
+    }
+    let p = Pipe(h);
+    p.send(req)?;
+    p.receive()
+}
+
+/// Creates one server end. The original design let Guests and Anonymous onto its pipe;
+/// here the DACL admits only SYSTEM and Administrators, and remote clients are rejected.
+fn server_instance(first: bool) -> std::io::Result<Pipe> {
+    let sddl: Vec<u16> = "D:P(A;;GA;;;SY)(A;;GA;;;BA)\0".encode_utf16().collect();
+    let mut sd: *mut c_void = null_mut();
+    // SAFETY: on success `sd` is a LocalAlloc'd descriptor, freed below.
+    if unsafe { ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.as_ptr(), 1, &mut sd, null_mut()) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let sa = SECURITY_ATTRIBUTES {
+        nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: sd,
+        bInheritHandle: 0,
+    };
+    let wide: Vec<u16> = PIPE.encode_utf16().chain([0]).collect();
+    // First-instance ownership stops another process squatting on the pipe name.
+    let open_mode = PIPE_ACCESS_DUPLEX | if first { FILE_FLAG_FIRST_PIPE_INSTANCE } else { 0 };
+    // SAFETY: all pointers are valid for the call.
+    let h = unsafe {
+        CreateNamedPipeW(
+            wide.as_ptr(),
+            open_mode,
+            PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+            PIPE_UNLIMITED_INSTANCES,
+            65536,
+            65536,
+            0,
+            &sa,
+        )
+    };
+    // SAFETY: `sd` came from LocalAlloc and isn't used after this.
+    unsafe { LocalFree(sd) };
+    if h == INVALID_HANDLE_VALUE {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(Pipe(h))
+}
+
+/// Serves requests until the process exits, one thread per connection.
+pub fn serve(handler: impl Fn(Request) -> Response + Send + Sync + 'static) -> std::io::Result<()> {
+    let handler = std::sync::Arc::new(handler);
+    let mut first = true;
+    loop {
+        let p = server_instance(first)?;
+        first = false;
+        // SAFETY: a valid pipe handle, synchronous mode.
+        let connected = unsafe { ConnectNamedPipe(p.0, null_mut()) } != 0 || crate::disk::last_error() == 535;
+        if !connected {
+            continue;
+        }
+        let h = handler.clone();
+        std::thread::spawn(move || {
+            if let Ok(req) = p.receive::<Request>() {
+                let _ = p.send(&h(req));
+            }
+            // SAFETY: a valid pipe handle.
+            unsafe { DisconnectNamedPipe(p.0) };
+        });
+    }
+}

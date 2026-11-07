@@ -1,0 +1,180 @@
+//! Running mounts: the registry the service owns, plus the periodic commit.
+use crate::volumes::{self, Target};
+use crate::winfsp::{HostOptions, Mount, Stats};
+use fscore::{CheckReport, Filesystem, MountOpts};
+use serde::{Deserialize, Serialize};
+use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+/// How often pending changes are committed, matching ext4's and Btrfs's own default.
+const COMMIT_INTERVAL: Duration = Duration::from_secs(5);
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MountRequest {
+    pub target: Target,
+    /// `X:`, or empty to take the next free letter.
+    pub mount_point: String,
+    pub write: bool,
+    pub hide_dotfiles: bool,
+    pub codepage: u32,
+    pub uid: Option<u32>,
+    pub gid: Option<u32>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MountStatus {
+    pub target: Target,
+    pub mount_point: String,
+    pub read_only: bool,
+    pub ro_reasons: Vec<String>,
+    pub notes: Vec<String>,
+    pub total_bytes: u64,
+    pub free_bytes: u64,
+    pub reads: u64,
+    pub writes: u64,
+    pub read_bytes: u64,
+    pub written_bytes: u64,
+}
+
+struct Entry {
+    target: Target,
+    fs: Arc<dyn Filesystem>,
+    mount: Mount,
+    stats: Arc<Stats>,
+}
+
+#[derive(Default)]
+pub struct Mounts {
+    list: Mutex<Vec<Entry>>,
+}
+
+fn free_letter() -> Option<String> {
+    use windows_sys::Win32::Storage::FileSystem::GetLogicalDrives;
+    // SAFETY: no arguments.
+    let used = unsafe { GetLogicalDrives() };
+    (3..26).rev().find(|i| used & (1 << i) == 0).map(|i| format!("{}:", (b'A' + i as u8) as char))
+}
+
+impl Mounts {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Vec<Entry>> {
+        self.list.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    pub fn mount(&self, r: MountRequest) -> Result<MountStatus, String> {
+        if self.lock().iter().any(|e| e.target == r.target) {
+            return Err("this volume is already mounted".into());
+        }
+        let point = if r.mount_point.is_empty() {
+            free_letter().ok_or("no free drive letters")?
+        } else {
+            r.mount_point.clone()
+        };
+        let opts = MountOpts { write: r.write, cache_bytes: 0 };
+        let fs = volumes::open(&r.target, opts).map_err(|e| e.to_string())?;
+        let host = HostOptions {
+            read_only: !r.write,
+            hide_dotfiles: r.hide_dotfiles,
+            codepage: r.codepage,
+            uid: r.uid,
+            gid: r.gid,
+            ..HostOptions::default()
+        };
+        let mount = Mount::start(fs.clone(), &point, host)?;
+        let stats = mount.stats.clone();
+        let e = Entry { target: r.target, fs, mount, stats };
+        let status = status_of(&e);
+        self.lock().push(e);
+        Ok(status)
+    }
+
+    /// Detaches the drive letter first, so nothing can write while the volume closes.
+    pub fn unmount(&self, point: &str) -> Result<(), String> {
+        let mut l = self.lock();
+        let i = l
+            .iter()
+            .position(|e| e.mount.mount_point.eq_ignore_ascii_case(point))
+            .ok_or("nothing is mounted there")?;
+        let e = l.remove(i);
+        drop(l);
+        let fs = e.fs.clone();
+        drop(e);
+        fs.unmount().map_err(|e| e.to_string())
+    }
+
+    pub fn unmount_all(&self) {
+        let all: Vec<Entry> = std::mem::take(&mut *self.lock());
+        for e in all {
+            let fs = e.fs.clone();
+            drop(e);
+            let _ = fs.unmount();
+        }
+    }
+
+    pub fn status(&self) -> Vec<MountStatus> {
+        self.lock().iter().map(status_of).collect()
+    }
+
+    pub fn sync_all(&self) -> Result<(), String> {
+        for fs in self.handles() {
+            fs.sync().map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
+    fn handles(&self) -> Vec<Arc<dyn Filesystem>> {
+        self.lock().iter().map(|e| e.fs.clone()).collect()
+    }
+
+    fn find(&self, point: &str) -> Result<Arc<dyn Filesystem>, String> {
+        let l = self.lock();
+        let e = l.iter().find(|e| e.mount.mount_point.eq_ignore_ascii_case(point));
+        e.map(|e| e.fs.clone()).ok_or_else(|| "nothing is mounted there".into())
+    }
+
+    pub fn scrub(&self, point: &str, progress: &mut dyn FnMut(u64, u64)) -> Result<CheckReport, String> {
+        self.find(point)?.scrub(progress).map_err(|e| e.to_string())
+    }
+
+    /// Snapshots the root subvolume to `name` at the top of the volume.
+    pub fn snapshot(&self, point: &str, name: &str, read_only: bool) -> Result<(), String> {
+        let fs = self.find(point)?;
+        let root = fs.root();
+        fs.snapshot(root, root, name.as_bytes(), read_only).map(|_| ()).map_err(|e| e.to_string())
+    }
+
+    pub fn create_subvolume(&self, point: &str, name: &str) -> Result<(), String> {
+        let fs = self.find(point)?;
+        fs.create_subvolume(fs.root(), name.as_bytes()).map(|_| ()).map_err(|e| e.to_string())
+    }
+
+    /// Commits on a timer. Errors are ignored here: a failing engine has already
+    /// switched itself to read-only and says so in its status.
+    pub fn spawn_committer(self: &Arc<Self>) {
+        let me = Arc::downgrade(self);
+        std::thread::spawn(move || loop {
+            std::thread::sleep(COMMIT_INTERVAL);
+            let Some(m) = me.upgrade() else { return };
+            for fs in m.handles() {
+                let _ = fs.sync();
+            }
+        });
+    }
+}
+
+fn status_of(e: &Entry) -> MountStatus {
+    let info = e.fs.info();
+    MountStatus {
+        target: e.target.clone(),
+        mount_point: e.mount.mount_point.clone(),
+        read_only: info.read_only,
+        ro_reasons: info.ro_reasons,
+        notes: info.notes,
+        total_bytes: info.total_bytes,
+        free_bytes: info.free_bytes,
+        reads: e.stats.reads.load(Ordering::Relaxed),
+        writes: e.stats.writes.load(Ordering::Relaxed),
+        read_bytes: e.stats.read_bytes.load(Ordering::Relaxed),
+        written_bytes: e.stats.written_bytes.load(Ordering::Relaxed),
+    }
+}

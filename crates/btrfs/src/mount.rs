@@ -236,15 +236,13 @@ impl Btrfs {
         {
             reasons.push("quotas are enabled: writing would leave qgroup accounting stale".into());
         }
-        if fs.devs.values().any(|d| !d.writable()) {
+        if opts.write && fs.devs.values().any(|d| !d.writable()) {
             reasons.push("a device was opened read-only".into());
         }
-        if opts.write {
-            fs.read_only = !reasons.is_empty();
-            fs.ro_reasons = reasons;
-            if !fs.read_only {
-                fs.begin_writes()?;
-            }
+        fs.read_only = !opts.write || !reasons.is_empty();
+        fs.ro_reasons = reasons;
+        if !fs.read_only {
+            fs.begin_writes()?;
         }
         Ok(Btrfs { fs: RwLock::new(fs) })
     }

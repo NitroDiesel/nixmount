@@ -78,3 +78,22 @@ fn fixtures_round_trip() {
         assert_same(&walk(&again).unwrap(), &m.tree(), &format!("{name} after remount"));
     }
 }
+
+fn debug_nospace() {
+    for (name, img) in fixtures() {
+        if !name.starts_with("ext2") {
+            continue;
+        }
+        let dev = Arc::new(MemDev::new(img));
+        let fs = Ext4::open(dev.clone(), MountOpts { write: true, cache_bytes: 0 }).unwrap();
+        let mut m = Model::from_tree(&walk(&fs).unwrap());
+        let mut r = Rng(9);
+        for i in 0..800 {
+            random_ops(&fs, &mut m, &mut r, 1, 100_000);
+            if let Err(p) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| assert_same(&walk(&fs).unwrap(), &m.tree(), &format!("after op {i}")))) {
+                eprintln!("free={} {:?}", fs.info().free_bytes, p.downcast_ref::<String>());
+                panic!("stop");
+            }
+        }
+    }
+}

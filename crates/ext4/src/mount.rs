@@ -262,7 +262,7 @@ impl Ext4 {
         if has_journal && sb.u32_at(0xE0) == 0 {
             reasons.push("external journals aren't supported for writing".into());
         }
-        if !dev.writable() {
+        if opts.write && !dev.writable() {
             reasons.push("the device was opened read-only".into());
         }
 
@@ -316,9 +316,7 @@ impl Ext4 {
         }
         let want_write = want_write && reasons.is_empty();
         fs.journal = journal;
-        if opts.write {
-            fs.ro_reasons = reasons;
-        }
+        fs.ro_reasons = reasons;
         fs.notes = notes;
         if want_write {
             fs.read_only = false;

@@ -27,12 +27,7 @@ jobs:
           cargo test --profile ci-test -p btrfs --test kernel -- --nocapture
       - name: Publish fixture images
         if: always()
-        run: |
-          mkdir -p fixtures
-          for f in ext4-default ext4-1k-nocsum ext3-1k ext2-2k ext4-inline btrfs-default btrfs-n4k btrfs-legacy; do
-            [ -f "$CAUSEWAY_OUT/$f.img" ] && gzip -9c "$CAUSEWAY_OUT/$f.img" > "fixtures/$f.img.gz"
-          done
-          ls -la fixtures
+        run: bash ci/make-fixtures.sh fixtures
       - uses: actions/upload-artifact@v4
         if: always()
         with:
