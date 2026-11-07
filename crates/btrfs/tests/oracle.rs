@@ -354,6 +354,32 @@ fn collect(fs: &dyn Filesystem, dir: fscore::Ino, prefix: &str, out: &mut Tree) 
     }
 }
 
+/// Filling a volume must fail cleanly, and it must stay possible to delete files to recover.
+#[test]
+fn full_disk() {
+    if !have_tools() {
+        return;
+    }
+    let tag = "btrfs-full";
+    let out = out_dir();
+    let src = out.join(format!("{tag}.src"));
+    std::fs::create_dir_all(&src).unwrap();
+    std::fs::write(src.join("seed"), b"seed").unwrap();
+    let imgs = make_images(tag, 1, 256 << 20);
+    mkfs(&imgs, &src, &[]);
+    let fs = open(&imgs, RW);
+    let mut model = Model::from_tree(&walk(&fs).unwrap());
+    random_ops(&fs, &mut model, &mut Rng(0xF011), 1500, 3_000_000);
+    assert!(fs.info().free_bytes < 64 << 20, "{tag}: the test never filled the volume");
+    assert!(!fs.info().read_only, "{tag}: {:?}", fs.info().ro_reasons);
+    assert_same(&walk(&fs).unwrap(), &model.tree(), &format!("{tag}: live"));
+    fs.unmount().unwrap();
+    drop(fs);
+    check(&imgs[0], tag);
+    let fs = open(&imgs, RO);
+    assert_same(&walk(&fs).unwrap(), &model.tree(), &format!("{tag}: reread"));
+}
+
 /// Power cut at sampled points: the volume must always open at a commit boundary.
 #[test]
 fn power_loss() {

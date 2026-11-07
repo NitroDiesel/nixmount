@@ -80,16 +80,30 @@ impl Fs {
         let goal = self.goal(ino, raw, lblk);
         if raw.flags() & F_EXTENTS != 0 {
             let (p, n) = self.alloc_blocks(goal, want.min(u32::MAX as u64) as u32)?;
-            self.add_i_blocks(raw, n as i64);
             let e = Extent { lblk: lblk as u32, phys: p, len: n, unwritten: false };
-            self.ext_insert(ino, raw, e)?;
+            if let Err(err) = self.ext_insert(ino, raw, e) {
+                // The tree needed a block the volume doesn't have. A write that already made
+                // progress keeps this transaction, so these blocks must not leak into it.
+                self.free_blocks(p, n)?;
+                return Err(err);
+            }
+            self.add_i_blocks(raw, n as i64);
             Ok((p, n))
         } else {
             let (p, n) = self.alloc_blocks(goal, want.min(1024) as u32)?;
-            self.add_i_blocks(raw, n as i64);
             for i in 0..n as u64 {
-                self.ind_set(raw, lblk + i, p + i)?;
+                if let Err(err) = self.ind_set(raw, lblk + i, p + i) {
+                    if i == 0 {
+                        self.free_blocks(p, n)?;
+                        return Err(err);
+                    }
+                    // The first `i` blocks are mapped: keep those and hand back the rest.
+                    self.free_blocks(p + i, n - i as u32)?;
+                    self.add_i_blocks(raw, i as i64);
+                    return Ok((p, i as u32));
+                }
             }
+            self.add_i_blocks(raw, n as i64);
             Ok((p, n))
         }
     }

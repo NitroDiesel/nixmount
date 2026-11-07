@@ -51,6 +51,49 @@ fn survives_bit_rot() {
     }
 }
 
+/// An attacker can compute checksums, so damage that passes verification is the real test
+/// of the structural checks behind it. Tree blocks are found by their filesystem id, damaged,
+/// and re-signed.
+#[test]
+fn survives_forged_checksums() {
+    let mut rng = Rng(0xF06ED);
+    for (name, base) in fixtures() {
+        let node = u32::from_le_bytes(base[0x10094..0x10098].try_into().unwrap()) as usize;
+        let fsid = base[0x10020..0x10030].to_vec();
+        let nodes: Vec<usize> =
+            (0..base.len() - node).step_by(node).filter(|o| base[o + 0x20..o + 0x30] == fsid[..]).collect();
+        assert!(nodes.len() > 8, "{name}: no tree blocks found");
+        for round in 0..400u64 {
+            let mut img = base.clone();
+            for _ in 0..1 + rng.below(3) {
+                let o = nodes[rng.below(nodes.len() as u64) as usize];
+                for _ in 0..1 + rng.below(6) {
+                    // Headers and the item table first: that is where the structure lives.
+                    let span = if rng.below(3) == 0 { node - 0x30 } else { 512 };
+                    img[o + 0x30 + rng.below(span as u64) as usize] = rng.next() as u8;
+                }
+                let c = crc32c::crc32c(&img[o + 0x20..o + node]);
+                img[o..o + 4].copy_from_slice(&c.to_le_bytes());
+            }
+            let write = round % 3 == 0;
+            let Ok(fs) = open(img, write) else { continue };
+            let _ = fs.info();
+            let _ = walk(&fs);
+            let _ = fs.scrub(&mut |_, _| {});
+            if write {
+                let mut m = Model::default();
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    random_ops(&fs, &mut m, &mut Rng(round), 20, 8_000);
+                }))
+                .map_err(|e| {
+                    let s = e.downcast_ref::<String>().cloned().unwrap_or_default();
+                    assert!(s.starts_with("op "), "{name} round {round}: engine panicked: {s}");
+                });
+            }
+        }
+    }
+}
+
 #[test]
 fn fixtures_round_trip() {
     for (name, img) in fixtures() {

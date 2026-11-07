@@ -164,6 +164,42 @@ fn ext2_2k() {
     round("ext2-2k", &["-t", "ext2", "-b", "2048"]);
 }
 
+/// Running out of space must fail cleanly: every failed operation rolls back, partial writes
+/// keep exact accounting, and the volume still passes fsck.
+#[test]
+fn full_disk() {
+    if !have_tools() {
+        return;
+    }
+    for (tag, args) in [
+        ("full-ext4", &["-t", "ext4", "-J", "size=4"][..]),
+        ("full-ext3", &["-t", "ext3", "-b", "1024", "-J", "size=1"][..]),
+        ("full-ext2", &["-t", "ext2", "-b", "1024"][..]),
+    ] {
+        let out = out_dir();
+        let src = out.join(format!("{tag}.src"));
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("seed"), b"seed").unwrap();
+        let img = out.join(format!("{tag}.img"));
+        let _ = std::fs::remove_file(&img);
+        std::fs::File::create(&img).unwrap().set_len(16 << 20).unwrap();
+        let st = Command::new("mke2fs").args(["-q", "-F", "-d"]).arg(&src).args(args).arg(&img).status().unwrap();
+        assert!(st.success());
+
+        let fs = open(&img, RW);
+        let mut model = Model::from_tree(&walk(&fs).unwrap());
+        let mut rng = Rng(0xF011);
+        random_ops(&fs, &mut model, &mut rng, 1500, 1_500_000);
+        assert!(fs.info().free_bytes < 2 << 20, "{tag}: the test never filled the volume");
+        assert_same(&walk(&fs).unwrap(), &model.tree(), &format!("{tag}: live"));
+        fs.unmount().unwrap();
+        drop(fs);
+        fsck(&img, tag);
+        let fs = open(&img, RO);
+        assert_same(&walk(&fs).unwrap(), &model.tree(), &format!("{tag}: reread"));
+    }
+}
+
 /// Features that force read-only must still read correctly and must never be written.
 fn read_only_round(tag: &str, args: &[&str]) {
     if !have_tools() {

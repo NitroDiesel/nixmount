@@ -9,8 +9,30 @@ use std::path::Component;
 const CHAR_BASE: u32 = 0xF000;
 const BYTE_BASE: u32 = 0xF700;
 
+/// `/` can't appear in a real Linux name, but a crafted disk can hold one, and Windows
+/// reads it as a path separator.
 fn unsafe_on_windows(c: char) -> bool {
-    (c as u32) < 0x20 || matches!(c, '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')
+    (c as u32) < 0x20 || matches!(c, '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|')
+}
+
+/// Turns a name from a volume into one path component for a real Windows folder, or None
+/// if it can only refer to somewhere else. This is the boundary that keeps a hostile
+/// volume's names from escaping an export destination.
+pub fn host_component(name: &[u8]) -> Option<String> {
+    if name.is_empty() || name == b"." || name == b".." {
+        return None;
+    }
+    let mut wide = to_wide(name, 0);
+    let text = String::from_utf16_lossy(&wide).to_uppercase();
+    let stem = text.split('.').next().unwrap_or("");
+    let numbered = stem.len() == 4
+        && (stem.starts_with("COM") || stem.starts_with("LPT"))
+        && stem.as_bytes()[3].is_ascii_digit();
+    // Windows reserves device names, even with an extension.
+    if matches!(stem, "CON" | "PRN" | "AUX" | "NUL") || numbered {
+        wide[0] = (CHAR_BASE + wide[0] as u32) as u16;
+    }
+    Some(String::from_utf16_lossy(&wide))
 }
 
 /// Linux name to Windows name.
@@ -175,6 +197,21 @@ mod tests {
     #[test]
     fn colon_cannot_address_a_stream() {
         assert!(!to_wide(b"a:b", 0).contains(&u16::from(b':')));
+    }
+
+    #[test]
+    fn hostile_names_cannot_leave_an_export_folder() {
+        for bad in [&b"."[..], b"..", b""] {
+            assert_eq!(host_component(bad), None);
+        }
+        for tricky in [&b"..\\..\\evil"[..], b"../../evil", b"a/b", b"C:\\x", b"NUL", b"con.txt", b"COM1", b"lpt9.log"] {
+            let safe = host_component(tricky).unwrap();
+            let path = std::path::Path::new(r"D:\dest").join(&safe);
+            assert_eq!(path.parent(), Some(std::path::Path::new(r"D:\dest")), "{safe}");
+            assert!(!safe.contains(['/', '\\', ':']), "{safe}");
+            assert!(!matches!(safe.to_uppercase().split('.').next(), Some("NUL" | "CON" | "COM1" | "LPT9")));
+        }
+        assert_eq!(host_component(b"console.txt").as_deref(), Some("console.txt"));
     }
 
     #[test]

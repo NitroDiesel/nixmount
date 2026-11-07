@@ -272,6 +272,7 @@ fn install_location() -> Result<std::path::PathBuf, String> {
 }
 
 pub fn install() -> Result<(), String> {
+    crate::config::secure_directory()?;
     let exe = install_location()?;
     // Quoted, or a path with spaces becomes a privilege-escalation hole.
     let cmd = wide(&format!("\"{}\" service run", exe.display()));

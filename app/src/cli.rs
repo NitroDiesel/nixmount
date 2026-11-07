@@ -22,6 +22,7 @@ Usage:
       --show-dotfiles             Don't mark dotfiles hidden
       --uid <n> --gid <n>         Owner of new files
   causeway unmount <X:>           Commit and detach
+  causeway automount on|off <target> [X:] [--rw]   Mount whenever the volume is present
   causeway sync                   Commit all mounted volumes now
   causeway ls <target> [path]     List a directory without mounting
   causeway export <target> <path> <dest>   Copy files out without mounting
@@ -30,7 +31,12 @@ Usage:
   causeway subvolume list|create|delete <X:> [name]    Manage Btrfs subvolumes and snapshots
   causeway service install|uninstall|run|debug
 
-A target is an image file (optionally file#partition) or disk:partition, e.g. 1:3.";
+A target is an image file (optionally file#partition) or disk:partition, e.g. 1:3.
+
+WinFsp - Windows File System Proxy, Copyright (C) Bill Zissimopoulos
+https://github.com/winfsp/winfsp";
+
+const MAX_EXPORT_DEPTH: u32 = 512;
 
 fn parse_target(s: &str) -> Target {
     if let Some((d, p)) = s.split_once(':') {
@@ -138,7 +144,11 @@ fn cmd_ls(target: &str, path: &str) -> Result<(), String> {
 
 /// Copies a file or directory tree out of a volume. Names are sanitised, so a hostile
 /// volume can't climb out of `dest`; symlinks are skipped rather than followed.
-fn export(fs: &dyn Filesystem, ino: fscore::Ino, dest: &Path, count: &mut u64) -> Result<(), String> {
+fn export(fs: &dyn Filesystem, ino: fscore::Ino, dest: &Path, depth: u32, count: &mut u64) -> Result<(), String> {
+    // A crafted directory can contain its own ancestor.
+    if depth > MAX_EXPORT_DEPTH {
+        return Err(format!("{}: folders are nested too deeply", dest.display()));
+    }
     let st = fs.stat(ino).map_err(|e| e.to_string())?;
     match st.kind {
         FileKind::Dir => {
@@ -150,8 +160,9 @@ fn export(fs: &dyn Filesystem, ino: fscore::Ino, dest: &Path, count: &mut u64) -
             })
             .map_err(|e| e.to_string())?;
             for e in ents {
-                let wide = crate::names::to_wide(&e.name, 0);
-                export(fs, e.ino, &dest.join(String::from_utf16_lossy(&wide)), count)?;
+                if let Some(name) = crate::names::host_component(&e.name) {
+                    export(fs, e.ino, &dest.join(name), depth + 1, count)?;
+                }
             }
         }
         FileKind::File => {
@@ -177,7 +188,7 @@ pub fn export_path(target: &Target, path: &str, dest: &Path) -> Result<u64, Stri
     let fs = volumes::open(target, MountOpts::default()).map_err(|e| e.to_string())?;
     let ino = resolve(fs.as_ref(), path).map_err(|e| e.to_string())?;
     let mut count = 0;
-    export(fs.as_ref(), ino, dest, &mut count)?;
+    export(fs.as_ref(), ino, dest, 0, &mut count)?;
     Ok(count)
 }
 
@@ -264,6 +275,21 @@ pub fn run(mut args: Vec<String>) -> Result<(), String> {
         "unmount" => {
             call(&Request::Unmount { point: arg(0)? })?;
             println!("Unmounted.");
+        }
+        "automount" => {
+            let write = take_flag(&mut args, "--rw");
+            let (mode, target) = (args.first().cloned().ok_or(USAGE)?, args.get(1).cloned().ok_or(USAGE)?);
+            let uuid = open_for_reading(&target)?.info().uuid;
+            let mount = (mode == "on").then(|| MountRequest {
+                target: parse_target(&target),
+                mount_point: args.get(2).cloned().unwrap_or_default(),
+                write,
+                hide_dotfiles: true,
+                codepage: 0,
+                uid: None,
+                gid: None,
+            });
+            call(&Request::SetAutomount { uuid, mount })?;
         }
         "sync" => {
             call(&Request::Sync)?;

@@ -261,6 +261,9 @@ impl Ext4 {
         }
         if has_journal && sb.u32_at(0xE0) == 0 {
             reasons.push("external journals aren't supported for writing".into());
+            if incompat & IN_RECOVER != 0 {
+                notes.push("the external journal has pending changes, so recent files may look out of date".into());
+            }
         }
         if opts.write && !dev.writable() {
             reasons.push("the device was opened read-only".into());

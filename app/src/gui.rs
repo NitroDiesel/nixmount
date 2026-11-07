@@ -111,6 +111,7 @@ enum Act {
     Export,
     InstallService,
     GetWinFsp,
+    WinFspHome,
     Dismiss,
 }
 
@@ -400,6 +401,11 @@ impl App {
             Act::BrowseRow(i) => self.browse_row(i),
             Act::Export => self.export(),
             Act::InstallService => self.install_service(),
+            Act::WinFspHome => {
+                let (verb, url) = (wide("open"), wide("https://github.com/winfsp/winfsp"));
+                // SAFETY: strings are NUL-terminated.
+                unsafe { ShellExecuteW(self.hwnd, verb.as_ptr(), url.as_ptr(), null(), null(), SW_SHOW) };
+            }
             Act::GetWinFsp => {
                 let (verb, url) = (wide("open"), wide("https://winfsp.dev/rel/"));
                 // SAFETY: strings are NUL-terminated.
@@ -533,7 +539,8 @@ impl App {
             path.push(r.name.clone());
         }
         let Some(dest) = pick_folder(self.hwnd) else { return };
-        let dest = dest.join(String::from_utf16_lossy(&crate::names::to_wide(leaf.as_bytes(), 0)));
+        let Some(safe) = crate::names::host_component(leaf.as_bytes()) else { return };
+        let dest = dest.join(safe);
         let (target, src) = (b.target.clone(), format!("/{}", path.join("/")));
         self.set_busy("Exporting…");
         let w = self.wnd();
@@ -743,7 +750,7 @@ impl App {
         y += p(&self.canvas, 40.0);
         self.canvas.text(Rect::new(x, y, cw, p(&self.canvas, 18.0)), "Volumes", Font::Small, t.muted, false);
         y += p(&self.canvas, 24.0);
-        let footer_h = p(&self.canvas, 96.0);
+        let footer_h = p(&self.canvas, 136.0);
         let bottom = r.bottom() - footer_h;
         let list: Vec<(String, String, String, bool, bool)> = self
             .volumes
@@ -796,7 +803,7 @@ impl App {
             self.region(row, Act::Select(i));
             y += row_h + p(&self.canvas, 2.0);
         }
-        let by = r.bottom() - p(&self.canvas, 88.0);
+        let by = r.bottom() - p(&self.canvas, 128.0);
         let bh = p(&self.canvas, 32.0);
         let half = (cw - p(&self.canvas, 8.0)) / 2;
         self.icon_button(Rect::new(x, by, half, bh), I_ADD, "Add image", Act::AddImage);
@@ -812,6 +819,12 @@ impl App {
         self.canvas.circle(x + radius, sy + p(&self.canvas, 12.0), radius, dot);
         let tx = x + p(&self.canvas, 16.0);
         self.canvas.text(Rect::new(tx, sy, cw - p(&self.canvas, 16.0), p(&self.canvas, 24.0)), label, Font::Small, t.muted, false);
+        // The WinFsp license asks for this notice and a link in the interface.
+        let nr = Rect::new(x, sy + p(&self.canvas, 28.0), cw, p(&self.canvas, 34.0));
+        let notice = "WinFsp - Windows File System Proxy, Copyright (C) Bill Zissimopoulos";
+        let hot = self.hover == Some(Act::WinFspHome);
+        self.canvas.paragraph(nr, notice, Font::Small, if hot { t.text } else { t.muted });
+        self.region(nr, Act::WinFspHome);
     }
 
     fn icon_button(&mut self, r: Rect, icon: &str, label: &str, act: Act) {

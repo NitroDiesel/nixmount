@@ -164,6 +164,10 @@ impl Fs {
                 return Ok(false);
             }
             for e in parse_dir_items(d)? {
+                // These can only exist on a crafted volume.
+                if e.name == b"." || e.name == b".." {
+                    continue;
+                }
                 // A subvolume whose root was deleted can leave a dangling entry behind.
                 let Ok(ino) = self.resolve_location(dir, &e) else { continue };
                 let de = DirEntry { kind: kind_of_ft(e.ftype), name: e.name, ino };

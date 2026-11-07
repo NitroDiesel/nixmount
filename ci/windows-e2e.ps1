@@ -18,6 +18,15 @@ function Check($what, $ok) {
     "ok: $what"
 }
 
+# Device events settle over a few seconds.
+function Wait-For($condition) {
+    for ($i = 0; $i -lt 30; $i++) {
+        if (& $condition) { return $true }
+        Start-Sleep -Seconds 1
+    }
+    $false
+}
+
 & $Exe service install
 if ($LASTEXITCODE) { throw 'service install failed' }
 
@@ -42,8 +51,7 @@ foreach ($item in @(@('ext4-default', 'K'), @('btrfs-default', 'L'))) {
     Remove-Item "${root}e2e\file3.txt"
     Check "$name rename, move and delete" ((Test-Path "${root}e2e\renamed.txt") -and (Test-Path "${root}moved.txt") -and -not (Test-Path "${root}e2e\file3.txt"))
 
-    # Names Windows can't normally express must stay usable through their mapping.
-    Check "$name hides nothing it shouldn't" ((Get-ChildItem $root -Force).Count -gt 3)
+    Check "$name follows a symbolic link" ((Get-Content "${root}link") -eq 'hello from linux')
 
     # A full disk has to fail loudly at write time, not vanish during write-back.
     $failed = $false
@@ -111,6 +119,21 @@ try {
     Check 'a locked read-write mount stays listed' ((& $Exe list | Out-String) -match "${disk}:${part}")
     & $Exe unmount 'J:'
     if ($LASTEXITCODE) { throw 'unmount of the raw partition failed' }
+
+    # Hotplug: a remembered volume mounts itself on arrival, and unplugging frees the letter.
+    & $Exe automount on "${disk}:${part}" 'J:'
+    if ($LASTEXITCODE) { throw 'could not enable automount' }
+    diskpart /s $detach | Out-Null
+    diskpart /s $attach | Out-Null
+    Check 'a remembered volume mounts itself when plugged in' (Wait-For { Test-Path 'J:\hello.txt' })
+    diskpart /s $detach | Out-Null
+    Check 'unplugging a mounted volume frees its drive letter' (Wait-For { -not (Test-Path 'J:\') })
+    diskpart /s $attach | Out-Null
+    [void](Wait-For { Test-Path 'J:\hello.txt' })
+    $disk = (Get-DiskImage -ImagePath $vhd).Number
+    & $Exe unmount 'J:'
+    & $Exe automount off "${disk}:${part}"
+    if ($LASTEXITCODE) { throw 'could not disable automount' }
 } finally {
     diskpart /s $detach | Out-Null
 }

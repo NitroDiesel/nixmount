@@ -36,10 +36,8 @@ impl Config {
     /// Writes through a temporary file, so a crash can't leave half a config behind.
     pub fn save(&self) -> Result<(), String> {
         let d = dir();
-        let first_time = !d.exists();
-        std::fs::create_dir_all(&d).map_err(|e| e.to_string())?;
-        if first_time {
-            lock_down(&d);
+        if !d.exists() {
+            secure_directory()?;
         }
         let tmp = d.join("config.tmp");
         let body = serde_json::to_vec_pretty(self).map_err(|e| e.to_string())?;
@@ -48,11 +46,23 @@ impl Config {
     }
 }
 
-/// `%ProgramData%` inherits user-writable ACLs. The service reads this directory as
-/// SYSTEM, so ordinary users must not be able to change what it mounts.
-fn lock_down(dir: &std::path::Path) {
-    let _ = std::process::Command::new("icacls")
-        .arg(dir)
-        .args(["/inheritance:r", "/grant:r", "*S-1-5-18:(OI)(CI)F", "/grant:r", "*S-1-5-32-544:(OI)(CI)F"])
-        .output();
+/// Makes the configuration folder writable by SYSTEM and Administrators only, since it
+/// decides what the service mounts. Any user can create folders in `%ProgramData%`, so one
+/// may already exist with a hostile owner, ACL or contents: all of that gets replaced, and
+/// the install stops if it can't be.
+pub fn secure_directory() -> Result<(), String> {
+    let d = dir();
+    std::fs::create_dir_all(&d).map_err(|e| e.to_string())?;
+    let steps: [&[&str]; 3] = [
+        &["/setowner", "*S-1-5-32-544", "/T", "/C"],
+        &["/reset", "/T", "/C"],
+        &["/inheritance:r", "/grant:r", "*S-1-5-18:(OI)(CI)F", "/grant:r", "*S-1-5-32-544:(OI)(CI)F", "/T", "/C"],
+    ];
+    for args in steps {
+        let ok = std::process::Command::new("icacls").arg(&d).args(args).output().is_ok_and(|o| o.status.success());
+        if !ok {
+            return Err(format!("could not secure {}", d.display()));
+        }
+    }
+    Ok(())
 }
