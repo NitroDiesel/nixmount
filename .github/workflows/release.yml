@@ -20,6 +20,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           Copy-Item target/release/nixmount.exe NixMount-Setup.exe
-          (Get-FileHash NixMount-Setup.exe -Algorithm SHA256).Hash.ToLower() + '  NixMount-Setup.exe' |
-              Set-Content NixMount-Setup.exe.sha256
+          # A Unix line ending, or sha256sum -c rejects the file.
+          (Get-FileHash NixMount-Setup.exe -Algorithm SHA256).Hash.ToLower() + "  NixMount-Setup.exe`n" |
+              Set-Content -NoNewline NixMount-Setup.exe.sha256
           gh release create $env:GITHUB_REF_NAME NixMount-Setup.exe NixMount-Setup.exe.sha256 --generate-notes
