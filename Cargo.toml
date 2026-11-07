@@ -5,7 +5,7 @@ members = ["crates/fscore", "crates/ext4", "crates/btrfs", "app"]
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-license = "GPL-2.0-or-later"
+license = "GPL-2.0-only"
 repository = "https://github.com/NitroDiesel/causeway"
 
 [profile.release]

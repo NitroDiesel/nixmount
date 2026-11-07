@@ -10,10 +10,12 @@ use windows_sys::Win32::Foundation::{CloseHandle, LocalFree, GENERIC_READ, GENER
 use windows_sys::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
 use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
 use windows_sys::Win32::Storage::FileSystem::{
+    FlushFileBuffers,
     CreateFileW, ReadFile, WriteFile, FILE_FLAG_FIRST_PIPE_INSTANCE, OPEN_EXISTING, PIPE_ACCESS_DUPLEX,
 };
 use windows_sys::Win32::System::Pipes::{
-    ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_BYTE,
+    ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, WaitNamedPipeW, PIPE_READMODE_BYTE, PIPE_REJECT_REMOTE_CLIENTS,
+    PIPE_TYPE_BYTE,
     PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
 };
 
@@ -119,17 +121,31 @@ impl Pipe {
     }
 }
 
-/// Sends one request to the service.
+/// Sends one request to the service. Between connections the server briefly has no free
+/// pipe instance, which shows up as busy or not-found, so those are retried.
 pub fn call(req: &Request) -> std::io::Result<Response> {
+    const ERROR_FILE_NOT_FOUND: i32 = 2;
+    const ERROR_PIPE_BUSY: i32 = 231;
     let wide: Vec<u16> = PIPE.encode_utf16().chain([0]).collect();
-    // SAFETY: `wide` is NUL-terminated.
-    let h = unsafe { CreateFileW(wide.as_ptr(), GENERIC_READ | GENERIC_WRITE, 0, null(), OPEN_EXISTING, 0, null_mut()) };
-    if h == INVALID_HANDLE_VALUE {
-        return Err(std::io::Error::last_os_error());
+    for attempt in 0.. {
+        // SAFETY: `wide` is NUL-terminated.
+        let h = unsafe { CreateFileW(wide.as_ptr(), GENERIC_READ | GENERIC_WRITE, 0, null(), OPEN_EXISTING, 0, null_mut()) };
+        if h != INVALID_HANDLE_VALUE {
+            let p = Pipe(h);
+            p.send(req)?;
+            return p.receive();
+        }
+        let e = std::io::Error::last_os_error();
+        match e.raw_os_error() {
+            Some(ERROR_PIPE_BUSY) if attempt < 20 => {
+                // SAFETY: `wide` is NUL-terminated.
+                unsafe { WaitNamedPipeW(wide.as_ptr(), 500) };
+            }
+            Some(ERROR_FILE_NOT_FOUND) if attempt < 3 => std::thread::sleep(std::time::Duration::from_millis(30)),
+            _ => return Err(e),
+        }
     }
-    let p = Pipe(h);
-    p.send(req)?;
-    p.receive()
+    unreachable!()
 }
 
 /// Creates one server end. The original design let Guests and Anonymous onto its pipe;
@@ -187,8 +203,12 @@ pub fn serve(handler: impl Fn(Request) -> Response + Send + Sync + 'static) -> s
             if let Ok(req) = p.receive::<Request>() {
                 let _ = p.send(&h(req));
             }
+            // Flushing first: disconnecting discards anything the client hasn't read yet.
             // SAFETY: a valid pipe handle.
-            unsafe { DisconnectNamedPipe(p.0) };
+            unsafe {
+                FlushFileBuffers(p.0);
+                DisconnectNamedPipe(p.0);
+            }
         });
     }
 }

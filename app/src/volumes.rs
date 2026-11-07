@@ -188,3 +188,33 @@ pub fn describe_image(path: &Path) -> Volume {
     }
     v
 }
+
+/// A list entry for a volume that is open, built from the engine's own view of it.
+pub fn describe_mounted(target: &Target, info: &VolumeInfo) -> Volume {
+    let (title, location) = match target {
+        Target::Partition { disk, part } => (format!("Partition {part}"), format!("Disk {disk}")),
+        Target::Group { members } => (format!("{} devices", members.len()), "Multi-device".to_string()),
+        Target::Image { path, .. } => (
+            path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned()),
+            path.parent().map_or_else(String::new, |p| p.display().to_string()),
+        ),
+    };
+    let mut v = Volume {
+        target: target.clone(),
+        title,
+        location,
+        size: info.total_bytes,
+        kind: info.fs_type.clone(),
+        mountable: true,
+        label: String::new(),
+        uuid: String::new(),
+        removable: false,
+        used: None,
+        features: vec![],
+        ro_reasons: vec![],
+        notes: vec![],
+        error: None,
+    };
+    fill_from(&mut v, info);
+    v
+}

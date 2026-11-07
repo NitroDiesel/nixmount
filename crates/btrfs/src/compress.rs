@@ -50,7 +50,15 @@ fn lzo_extent(src: &[u8], ram: usize, sector: usize) -> Result<Vec<u8>> {
         let n = src.u32_at(p) as usize;
         p += 4;
         let Some(seg) = src.get(p..p + n) else { return bad("lzo") };
-        lzo1x(seg, &mut out, ram)?;
+        let before = out.len();
+        lzo1x(seg, &mut out, ram).map_err(|_| {
+            let head: Vec<String> = seg.iter().take(8).map(|b| format!("{b:02x}")).collect();
+            FsError::Corrupt(format!(
+                "lzo stream is invalid: segment at {p}/{total}, {n} bytes starting {}, decoded {} of {ram} from {before}",
+                head.join(""),
+                out.len()
+            ))
+        })?;
         p += n;
     }
     Ok(out)

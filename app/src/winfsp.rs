@@ -785,9 +785,18 @@ unsafe extern "system" fn set_file_size(
 ) -> Ntstatus {
     guard(|| {
         let (h, f) = (host(fs), handle(ctx));
-        // Allocation changes only matter when they cut into existing data.
-        if allocation != 0 && h.fs.stat(f.ino).is_ok_and(|s| new_size >= s.size) {
-            return h.fill(info, f.ino);
+        // Allocation requests come ahead of cached writes. The engines allocate lazily, so
+        // this is the last chance to report a full disk to the application: once the data
+        // is in the cache, a failure would only surface as a lost delayed write.
+        if allocation != 0 {
+            let Ok(st) = h.fs.stat(f.ino) else { return STATUS_IO_DEVICE_ERROR };
+            if new_size >= st.size {
+                let need = new_size.saturating_sub(st.alloc);
+                if need > 0 && need > h.fs.info().free_bytes {
+                    return STATUS_DISK_FULL;
+                }
+                return h.fill(info, f.ino);
+            }
         }
         let a = SetAttr { size: Some(new_size), ..SetAttr::default() };
         match h.fs.set_attr(f.ino, &a) {

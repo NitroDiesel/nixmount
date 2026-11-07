@@ -181,7 +181,12 @@ impl Fs {
             let n = (span.min((c.len - off).min((buf.len() - done) as u64))) as usize;
             let dst = &mut buf[done..done + n];
             if c.is_parity() && mirror > 0 {
-                self.rebuild(c, off, dst)?;
+                // Only a lost stripe needs rebuilding. A healthy one in the same read may
+                // be unrebuildable because the failed device is part of its row.
+                if self.rebuild(c, off, dst).is_err() {
+                    let (i, phys) = copies[0];
+                    self.dev_read(c.stripes[i].devid, phys, dst)?;
+                }
             } else {
                 let (i, phys) = copies[mirror % copies.len()];
                 self.dev_read(c.stripes[i].devid, phys, dst)?;

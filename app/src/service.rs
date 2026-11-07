@@ -5,12 +5,20 @@ use crate::ipc::{self, Request, Response, ScrubState};
 use crate::mounts::Mounts;
 use crate::volumes;
 use std::ptr::{null, null_mut};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use windows_sys::Win32::Foundation::{NO_ERROR, ERROR_CALL_NOT_IMPLEMENTED};
+use windows_sys::core::GUID;
+use windows_sys::Win32::Foundation::{ERROR_CALL_NOT_IMPLEMENTED, NO_ERROR};
 use windows_sys::Win32::System::Services::*;
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    RegisterDeviceNotificationW, DBT_DEVTYP_DEVICEINTERFACE, DEV_BROADCAST_DEVICEINTERFACE_W,
+};
 
 pub const NAME: &str = "Causeway";
 const SERVICE_WIN32_OWN: u32 = SERVICE_WIN32_OWN_PROCESS;
+const DBT_DEVICEARRIVAL: u32 = 0x8000;
+const DBT_DEVICEREMOVECOMPLETE: u32 = 0x8004;
+const DEVICE_NOTIFY_SERVICE_HANDLE: u32 = 1;
 
 struct State {
     mounts: Arc<Mounts>,
@@ -39,7 +47,7 @@ fn set_state(state: u32, accept: u32) {
     unsafe { SetServiceStatus(h as SERVICE_STATUS_HANDLE, &st) };
 }
 
-unsafe extern "system" fn control(code: u32, _ty: u32, _data: *mut std::ffi::c_void, _ctx: *mut std::ffi::c_void) -> u32 {
+unsafe extern "system" fn control(code: u32, ty: u32, _data: *mut std::ffi::c_void, _ctx: *mut std::ffi::c_void) -> u32 {
     match code {
         SERVICE_CONTROL_STOP | SERVICE_CONTROL_PRESHUTDOWN | SERVICE_CONTROL_SHUTDOWN => {
             set_state(SERVICE_STOP_PENDING, 0);
@@ -49,9 +57,43 @@ unsafe extern "system" fn control(code: u32, _ty: u32, _data: *mut std::ffi::c_v
             set_state(SERVICE_STOPPED, 0);
             NO_ERROR
         }
+        SERVICE_CONTROL_DEVICEEVENT => {
+            if ty == DBT_DEVICEARRIVAL || ty == DBT_DEVICEREMOVECOMPLETE {
+                device_changed();
+            }
+            NO_ERROR
+        }
         SERVICE_CONTROL_INTERROGATE => NO_ERROR,
         _ => ERROR_CALL_NOT_IMPLEMENTED,
     }
+}
+
+/// Reacts to disks coming and going. One unplug raises a burst of events, and control
+/// handlers must return quickly, so a single worker settles and then handles them all.
+fn device_changed() {
+    static PENDING: AtomicBool = AtomicBool::new(false);
+    if PENDING.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    std::thread::spawn(|| {
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        PENDING.store(false, Ordering::Release);
+        if let Some(s) = STATE.get() {
+            s.mounts.prune_missing();
+            automount(&s.mounts);
+        }
+    });
+}
+
+/// Asks for disk arrival and removal events, the job of the original driver's PnP code.
+fn watch_devices(h: SERVICE_STATUS_HANDLE) {
+    // SAFETY: an all-zero filter is valid before its fields are set.
+    let mut filter: DEV_BROADCAST_DEVICEINTERFACE_W = unsafe { std::mem::zeroed() };
+    filter.dbcc_size = size_of::<DEV_BROADCAST_DEVICEINTERFACE_W>() as u32;
+    filter.dbcc_devicetype = DBT_DEVTYP_DEVICEINTERFACE;
+    filter.dbcc_classguid = GUID::from_u128(0x53F56307_B6BF_11D0_94F2_00A0C91EFB8B);
+    // SAFETY: the filter is valid for the call. Failure only costs hotplug automounting.
+    unsafe { RegisterDeviceNotificationW(h, (&raw const filter).cast(), DEVICE_NOTIFY_SERVICE_HANDLE) };
 }
 
 unsafe extern "system" fn service_main(_argc: u32, _argv: *mut *mut u16) {
@@ -63,8 +105,10 @@ unsafe extern "system" fn service_main(_argc: u32, _argv: *mut *mut u16) {
     let mounts = Arc::new(Mounts::default());
     mounts.spawn_committer();
     let _ = STATE.set(State { mounts: mounts.clone(), scrub: Arc::default() });
-    automount(&mounts);
+    watch_devices(h);
     set_state(SERVICE_RUNNING, SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_PRESHUTDOWN);
+    // Scanning disks can take a while, and the service manager shouldn't wait for it.
+    std::thread::spawn(move || automount(&mounts));
     let _ = ipc::serve(handle);
     set_state(SERVICE_STOPPED, 0);
 }
@@ -100,6 +144,12 @@ fn handle(r: Request) -> Response {
         Request::Scan => {
             let mut all = volumes::scan_disks();
             all.extend(Config::load().images.iter().map(|p| volumes::describe_image(p)));
+            // A partition mounted read-write is locked, so a rescan can't see it.
+            for v in s.mounts.volumes() {
+                if !all.iter().any(|x| x.target == v.target) {
+                    all.push(v);
+                }
+            }
             Response::Volumes(all)
         }
         Request::Inspect { path } => {
@@ -202,12 +252,16 @@ fn manager() -> Result<ScHandle, String> {
     Ok(ScHandle(h))
 }
 
-/// Copies the executable next to where the service will run it from. A SYSTEM service
-/// must not start from a directory an ordinary user can write to.
+fn install_dir() -> Result<std::path::PathBuf, String> {
+    let base = std::env::var_os("ProgramW6432").or_else(|| std::env::var_os("ProgramFiles"));
+    Ok(std::path::PathBuf::from(base.ok_or("no Program Files directory")?).join("Causeway"))
+}
+
+/// Copies the executable to where the service will run it from. A SYSTEM service must
+/// not start from a directory an ordinary user can write to.
 fn install_location() -> Result<std::path::PathBuf, String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let base = std::env::var_os("ProgramW6432").or_else(|| std::env::var_os("ProgramFiles"));
-    let dir = std::path::PathBuf::from(base.ok_or("no Program Files directory")?).join("Causeway");
+    let dir = install_dir()?;
     let dest = dir.join("causeway.exe");
     if exe != dest {
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
@@ -276,5 +330,25 @@ pub fn uninstall() -> Result<(), String> {
             return Err(std::io::Error::last_os_error().to_string());
         }
     }
-    Ok(())
+    drop(svc);
+    remove_installed_copy()
+}
+
+/// Deletes what `install` copied. A running program can't delete itself, so uninstalling
+/// from the installed copy leaves it behind and says so.
+fn remove_installed_copy() -> Result<(), String> {
+    let dir = install_dir()?;
+    let dest = dir.join("causeway.exe");
+    if std::env::current_exe().map_err(|e| e.to_string())? == dest {
+        return Err(format!("the service is removed; delete {} to finish", dir.display()));
+    }
+    // The service process needs a moment to exit and release the file.
+    for _ in 0..50 {
+        if std::fs::remove_file(&dest).is_ok() || !dest.exists() {
+            let _ = std::fs::remove_dir(&dir);
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    Err(format!("could not delete {}", dest.display()))
 }

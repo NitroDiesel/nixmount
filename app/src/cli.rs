@@ -1,6 +1,6 @@
 //! The command line: everything the interface does, for scripts.
 use crate::ipc::{self, Request, Response};
-use crate::mounts::{MountRequest, Mounts};
+use crate::mounts::MountRequest;
 use crate::volumes::{self, Target, Volume};
 use crate::winfsp::{HostOptions, Mount};
 use fscore::{resolve, FileKind, Filesystem, MountOpts};
@@ -101,14 +101,14 @@ fn cmd_info(target: &str) -> Result<(), String> {
     println!("Size:       {} ({} free)", human(i.total_bytes), human(i.free_bytes));
     println!("Block size: {}", i.block_size);
     println!("Features:   {}", i.features.join(" "));
+    if i.ro_reasons.is_empty() {
+        println!("Writing:    available with --rw");
+    }
+    for r in &i.ro_reasons {
+        println!("Read-only:  {r}");
+    }
     for n in &i.notes {
         println!("Note:       {n}");
-    }
-    let path_target = parse_target(target);
-    if let Target::Image { .. } = path_target {
-        if let Ok(w) = volumes::open(&path_target, MountOpts { write: false, cache_bytes: 0 }) {
-            let _ = w;
-        }
     }
     Ok(())
 }
@@ -200,8 +200,6 @@ fn foreground(req: MountRequest) -> Result<(), String> {
         println!("  {r}");
     }
     println!("Press Enter to unmount.");
-    let m = Arc::new(Mounts::default());
-    m.spawn_committer();
     let keep = fs.clone();
     std::thread::spawn(move || loop {
         std::thread::sleep(std::time::Duration::from_secs(5));

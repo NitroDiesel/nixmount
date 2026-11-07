@@ -1,7 +1,8 @@
 //! Running mounts: the registry the service owns, plus the periodic commit.
-use crate::volumes::{self, Target};
+use crate::disk::RawDev;
+use crate::volumes::{self, Target, Volume};
 use crate::winfsp::{HostOptions, Mount, Stats};
-use fscore::{CheckReport, Filesystem, MountOpts};
+use fscore::{CheckReport, Filesystem, FsError, MountOpts};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
@@ -111,6 +112,20 @@ impl Mounts {
         }
     }
 
+    /// Drops mounts whose device was unplugged, freeing their drive letters.
+    pub fn prune_missing(&self) {
+        let gone: Vec<String> =
+            self.lock().iter().filter(|e| !present(&e.target)).map(|e| e.mount.mount_point.clone()).collect();
+        for point in gone {
+            let _ = self.unmount(&point);
+        }
+    }
+
+    /// Describes mounted volumes for the volume list.
+    pub fn volumes(&self) -> Vec<Volume> {
+        self.lock().iter().map(|e| volumes::describe_mounted(&e.target, &e.fs.info())).collect()
+    }
+
     pub fn status(&self) -> Vec<MountStatus> {
         self.lock().iter().map(status_of).collect()
     }
@@ -159,6 +174,20 @@ impl Mounts {
                 let _ = fs.sync();
             }
         });
+    }
+}
+
+/// False only when the device is really gone. A partition this process has locked for
+/// writing fails to open too, but with an access error rather than not-found.
+fn present(t: &Target) -> bool {
+    let attached = |disk: u32, part: u32| match RawDev::open(disk, part, false) {
+        Err(FsError::Io(e)) => !matches!(e.raw_os_error(), Some(2 | 3)),
+        _ => true,
+    };
+    match t {
+        Target::Image { path, .. } => path.exists(),
+        Target::Partition { disk, part } => attached(*disk, *part),
+        Target::Group { members } => members.iter().all(|m| attached(m.0, m.1)),
     }
 }
 

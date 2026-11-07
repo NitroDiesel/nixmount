@@ -566,7 +566,6 @@ impl Fs {
             remove_range(&mut free, s, l);
         }
         self.alloc.groups.insert(start, Group { free: Some(free), ..group });
-        self.notes.dedup();
         Ok(true)
     }
 

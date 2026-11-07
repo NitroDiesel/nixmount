@@ -231,9 +231,7 @@ impl Btrfs {
         if fs.chunks.values().any(|c| c.ty & (RAID5 | RAID6) != 0) {
             reasons.push("RAID5/6 volumes are read-only here: the write hole risks data on a crash".into());
         }
-        if fs.get(fs.root_tree, Key::new(QUOTA_TREE, K_ROOT_ITEM, 0)).ok().flatten().is_some()
-            || fs.root_item(QUOTA_TREE).is_ok()
-        {
+        if fs.root_item(QUOTA_TREE).is_ok() {
             reasons.push("quotas are enabled: writing would leave qgroup accounting stale".into());
         }
         if opts.write && fs.devs.values().any(|d| !d.writable()) {
@@ -334,7 +332,7 @@ impl Fs {
     }
 }
 
-/// Keeps the crc helper reachable for extent-ref hashing.
+/// CRC-32C of a little-endian u64, the building block of extent ref hashes.
 pub fn crc_le(seed: u32, v: u64) -> u32 {
     crc32c_raw(seed, &v.to_le_bytes())
 }

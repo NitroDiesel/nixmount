@@ -5,7 +5,7 @@ use crate::cli;
 use crate::ipc::{self, Request, Response, ScrubState};
 use crate::mounts::{MountRequest, MountStatus};
 use crate::volumes::{self, Target, Volume};
-use fscore::{resolve, DirEntry, FileKind, Filesystem, Ino, MountOpts};
+use fscore::{resolve, DirEntry, FileKind, Filesystem, MountOpts};
 use std::path::PathBuf;
 use std::ptr::{null, null_mut};
 use std::sync::Arc;
@@ -35,8 +35,8 @@ const I_LINK: &str = "\u{E71B}";
 const I_BACK: &str = "\u{E72B}";
 const I_WARN: &str = "\u{E7BA}";
 const I_CLOSE: &str = "\u{E711}";
-const I_INFO: &str = "{E946}";
-const I_CHEVRON: &str = "{E70D}";
+const I_INFO: &str = "\u{E946}";
+const I_CHEVRON: &str = "\u{E70D}";
 
 struct Theme {
     bg: Color,
@@ -136,7 +136,6 @@ struct Browser {
 
 struct Row {
     name: String,
-    ino: Ino,
     kind: FileKind,
     size: u64,
 }
@@ -822,7 +821,7 @@ impl App {
             return y;
         };
         let inner = r.w - self.canvas.px(32.0);
-        let (tw, _) = (inner - self.canvas.px(170.0), 0);
+        let tw = inner - self.canvas.px(170.0);
         let h = self.canvas.px(88.0);
         let card = Rect::new(r.x, y, r.w, h);
         self.canvas.card(card, radius, t.card, t.line);
@@ -1202,10 +1201,9 @@ fn list_into(b: &mut Browser) {
     });
     for e in ents {
         let (kind, size) = b.fs.stat(e.ino).map_or((e.kind, 0), |s| (s.kind, s.size));
-        b.rows.push(Row { name: String::from_utf8_lossy(&e.name).into_owned(), ino: e.ino, kind, size });
+        b.rows.push(Row { name: String::from_utf8_lossy(&e.name).into_owned(), kind, size });
     }
     b.rows.sort_by(|x, y| (x.kind != FileKind::Dir, &x.name).cmp(&(y.kind != FileKind::Dir, &y.name)));
-    let _ = b.rows.first().map(|r| r.ino);
 }
 
 fn pick_folder(owner: HWND) -> Option<PathBuf> {

@@ -73,7 +73,7 @@ impl Journal {
         if self.v3() {
             16
         } else {
-            8 + if self.wide() { 4 } else { 0 } + if self.v2() { 0 } else { 0 }
+            8 + if self.wide() { 4 } else { 0 }
         }
     }
     fn phys(&self, l: u32) -> Result<u64> {
@@ -247,9 +247,7 @@ impl Fs {
         let limit = j.maxlen as u64 * 2;
         let mut steps = 0u64;
         'scan: loop {
-            let mut in_txn = 0u32;
             let mut txn_revokes: Vec<u64> = vec![];
-            let txn_start = pos;
             loop {
                 steps += 1;
                 if steps > limit {
@@ -265,10 +263,8 @@ impl Fs {
                         if !self.check_tail(j, &b) {
                             break 'scan;
                         }
-                        for t in self.parse_tags(j, &b) {
-                            let _ = t;
+                        for _ in self.parse_tags(j, &b) {
                             pos = j.next(pos);
-                            in_txn += 1;
                         }
                     }
                     T_REVOKE => {
@@ -297,7 +293,6 @@ impl Fs {
                     _ => break 'scan,
                 }
             }
-            let _ = (in_txn, txn_start);
             for r in txn_revokes {
                 let e = revoked.entry(r).or_insert(seq);
                 *e = (*e).max(seq);

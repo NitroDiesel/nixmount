@@ -1,7 +1,7 @@
 //! A small software canvas over a GDI DIB: antialiased shapes are rasterised here and
 //! text goes through GDI. No GPU context and no toolkit, which keeps the whole interface
 //! at a few megabytes and costs nothing between repaints.
-use std::ptr::{null, null_mut};
+use std::ptr::null_mut;
 use windows_sys::Win32::Foundation::{RECT, SIZE};
 use windows_sys::Win32::Graphics::Gdi::*;
 
@@ -288,7 +288,3 @@ impl Drop for Canvas {
         }
     }
 }
-
-const _: () = {
-    let _ = null::<u8>;
-};

@@ -222,10 +222,11 @@ impl Fs {
 
     /// Allocates up to `want` contiguous blocks near `goal`. Returns (start, count).
     pub fn alloc_blocks(&mut self, goal: u64, want: u32) -> Result<(u64, u32)> {
-        let want = want.clamp(1, crate::extent::MAX_LEN);
-        if self.free_total() <= self.reserved_blocks() {
+        let avail = self.free_total().saturating_sub(self.reserved_blocks());
+        if avail == 0 {
             return Err(FsError::NoSpace);
         }
+        let want = want.clamp(1, crate::extent::MAX_LEN).min(avail.min(u32::MAX as u64) as u32);
         let groups = self.g.groups;
         let g0 = self.g.group_of(goal.max(self.g.first_data));
         for i in 0..groups {

@@ -383,7 +383,7 @@ impl Fs {
         let lblk = self.dir_blocks(raw);
         let p = self.alloc_file_block(dir, raw, lblk)?;
         let mut b = vec![0u8; self.g.bs];
-        put_rec_len(&mut b, 4 - 4, self.usable());
+        put_rec_len(&mut b, 0, self.usable());
         self.init_tail(&mut b);
         self.fresh(p)?.copy_from_slice(&b);
         crate::inode::set_size(raw, (lblk + 1) * self.g.bs as u64);

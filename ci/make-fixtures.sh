@@ -18,9 +18,9 @@ ext() {
   mke2fs -q -F -d "$src" "$@" "$out/$name.img"
   gzip -9f "$out/$name.img"
 }
-ext ext4-default -t ext4 -J size=1
+ext ext4-default -t ext4 -J size=4
 ext ext4-1k-nocsum -t ext4 -b 1024 -O '^metadata_csum,^64bit,uninit_bg' -J size=1
-ext ext4-inline -t ext4 -O inline_data -J size=1
+ext ext4-inline -t ext4 -O inline_data -J size=4
 ext ext3-1k -t ext3 -b 1024 -J size=1
 ext ext2-2k -t ext2 -b 2048
 
