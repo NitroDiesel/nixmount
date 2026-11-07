@@ -2,7 +2,7 @@
 //! Lives in `%ProgramData%\NixMount`, writable only by administrators and SYSTEM.
 use crate::mounts::MountRequest;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Automount {
@@ -37,7 +37,7 @@ impl Config {
     pub fn save(&self) -> Result<(), String> {
         let d = dir();
         if !d.exists() {
-            secure_directory()?;
+            secure_directory(false)?;
         }
         let tmp = d.join("config.tmp");
         let body = serde_json::to_vec_pretty(self).map_err(|e| e.to_string())?;
@@ -46,25 +46,33 @@ impl Config {
     }
 }
 
+/// Changes one path's permissions, never a tree: `/T` walks through junctions, so a planted
+/// one would aim this at any file on the machine. `/L` likewise acts on a link, not its target.
+fn icacls(path: &Path, args: &[&str]) -> Result<(), String> {
+    let tool = crate::install::system_dir().join("icacls.exe");
+    let ok = std::process::Command::new(tool).arg(path).args(args).arg("/L").output().is_ok_and(|o| o.status.success());
+    ok.then_some(()).ok_or_else(|| format!("could not secure {}", path.display()))
+}
+
 /// Makes the configuration folder writable by SYSTEM and Administrators only, since it
-/// decides what the service mounts. Any user can create folders in `%ProgramData%`, so one
-/// may already exist with a hostile owner, ACL or contents: all of that gets replaced, and
-/// the install stops if it can't be.
-pub fn secure_directory() -> Result<(), String> {
+/// decides what the service mounts. Any user can create folders in `%ProgramData%`, so before
+/// a first install it may hold anything, and with `keep_settings` false all of that goes: the
+/// install stops if it can't. Pass true only for a folder an earlier install secured.
+pub fn secure_directory(keep_settings: bool) -> Result<(), String> {
+    const ADMINS: &str = "*S-1-5-32-544";
     let d = dir();
-    std::fs::create_dir_all(&d).map_err(|e| e.to_string())?;
-    let steps: [&[&str]; 3] = [
-        &["/setowner", "*S-1-5-32-544", "/T", "/C"],
-        &["/reset", "/T", "/C"],
-        &["/inheritance:r", "/grant:r", "*S-1-5-18:(OI)(CI)F", "/grant:r", "*S-1-5-32-544:(OI)(CI)F", "/T", "/C"],
-    ];
-    for args in steps {
-        let icacls = crate::install::system_dir().join("icacls.exe");
-        let ok = std::process::Command::new(icacls).arg(&d).args(args).output().is_ok_and(|o| o.status.success());
-        if !ok {
-            return Err(format!("could not secure {}", d.display()));
-        }
+    if !keep_settings && std::fs::symlink_metadata(&d).is_ok() {
+        icacls(&d, &["/setowner", ADMINS])?;
+        icacls(&d, &["/grant", "*S-1-5-32-544:(F)"])?;
+        // This removes links rather than following them.
+        std::fs::remove_dir_all(&d).map_err(|e| format!("could not clear {}: {e}", d.display()))?;
     }
+    std::fs::create_dir_all(&d).map_err(|e| e.to_string())?;
+    icacls(&d, &["/setowner", ADMINS])?;
+    icacls(&d, &["/inheritance:r", "/grant:r", "*S-1-5-18:(OI)(CI)F", "/grant:r", "*S-1-5-32-544:(OI)(CI)F"])?;
+    // Versions before 0.1.2 left this file with no permissions at all when upgrading. Inheriting
+    // from the folder brings it back, and on a first install there is simply nothing to do.
+    let _ = icacls(&path(), &["/reset"]);
     Ok(())
 }
 

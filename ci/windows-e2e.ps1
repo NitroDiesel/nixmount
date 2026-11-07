@@ -47,7 +47,24 @@ function Wait-For($condition) {
 }
 
 Check 'the machine starts without the driver' (-not (Test-Path $driver))
+
+# Any user can create the settings folder before setup runs, so nothing in it can be trusted:
+# not its settings or its permissions, and not a junction aimed at something worth damaging.
+$settings = "$env:ProgramData\NixMount"
+$decoy = "$Out\decoy"
+New-Item -ItemType Directory -Force $settings, $decoy | Out-Null
+Set-Content "$settings\config.json" '{"automounts":[],"images":["C:\\planted.img"]}'
+Set-Content "$decoy\private.txt" 'private'
+icacls "$decoy\private.txt" /inheritance:r /grant '*S-1-5-18:F' '*S-1-5-32-544:F' '*S-1-5-19:R' | Out-Null
+New-Item -ItemType Junction -Path "$settings\inner" -Target $decoy | Out-Null
+icacls $settings /grant '*S-1-5-32-545:(OI)(CI)F' | Out-Null
+$private = (Get-Acl "$decoy\private.txt").Sddl
+
 NixMount install
+Check 'setup clears out a settings folder planted before it ran' (@(Get-ChildItem $settings -Force).Count -eq 0)
+Check 'setup leaves what a planted junction points at alone' ((Test-Path "$decoy\private.txt") -and (Get-Acl "$decoy\private.txt").Sddl -eq $private)
+Check 'ordinary users cannot change the settings' (-not ((icacls $settings | Out-String) -match 'Users'))
+Remove-Item -Recurse $decoy
 Check 'setup installed the bundled driver' (Test-Path $driver)
 Check 'setup started the service' ((Get-Service NixMount).Status -eq 'Running')
 Check 'setup installed to Program Files' (Test-Path "$program\nixmount.exe")
@@ -180,6 +197,11 @@ try {
     Start-Sleep -Seconds 4
     Mount-DiskImage -ImagePath $vhd -NoDriveLetter | Out-Null
     Check 'a dismissed volume mounts again after a real unplug' (Wait-For { Test-Path 'J:\hello.txt' })
+
+    # An upgrade is setup run over itself, and it must keep what the user set up.
+    NixMount install
+    Check 'reinstalling keeps remembered volumes' (Wait-For { Test-Path 'J:\hello.txt' })
+    Check 'reinstalling leaves the settings readable' ((Get-Content "$settings\config.json" -Raw) -match 'automounts')
     $disk = (Get-DiskImage -ImagePath $vhd).Number
     NixMount unmount 'J:'
     "step: automount off"

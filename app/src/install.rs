@@ -168,7 +168,8 @@ pub fn install() -> Result<(), String> {
     let dir = program_dir()?;
     let dest = dir.join("nixmount.exe");
     let this = std::env::current_exe().map_err(|e| e.to_string())?;
-    config::secure_directory()?;
+    // Only an administrator can have put the program there, so settings beside it are ours.
+    config::secure_directory(dest.exists())?;
     // An upgrade has to stop the running copy. Its mounts close cleanly on the way.
     service::stop()?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;

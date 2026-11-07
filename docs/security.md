@@ -38,9 +38,10 @@ The service runs as SYSTEM, so its boundaries matter:
 - Messages are size-limited and decoded with a schema, not parsed by hand.
 - It runs from `Program Files`, not from wherever it was downloaded, and its path is quoted. A
   service binary in a user-writable folder would be a privilege-escalation hole.
-- `%ProgramData%\NixMount` decides what the service mounts, so installing resets it to SYSTEM and
-  Administrators only. Any user can create folders there, so it may already exist with a hostile
-  owner or ACL, and the install stops if those can't be replaced.
+- `%ProgramData%\NixMount` decides what the service mounts, so it is open to SYSTEM and
+  Administrators only. Any user can create folders there, so a first install deletes whatever it
+  finds, without following links, and stops if it can't. An upgrade keeps the settings, because
+  only an administrator can have put the program in place.
 - WinFsp's DLL is loaded by absolute path from the registry, which keeps DLL search-order attacks
   out of the process.
 

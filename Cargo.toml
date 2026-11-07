@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/fscore", "crates/ext4", "crates/btrfs", "app"]
 
 [workspace.package]
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 license = "GPL-2.0-only"
 authors = ["NitroDiesel", "Claude <noreply@anthropic.com>"]
