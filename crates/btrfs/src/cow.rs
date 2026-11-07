@@ -140,11 +140,11 @@ impl Fs {
         Ok(())
     }
 
-    /// Descends to `key`, copying blocks on the way. With `need > 0` it guarantees that
+    /// Descends to `key`, copying blocks on the way. With `need > 0` (item plus header) it guarantees that
     /// much free space in the final leaf, splitting preemptively so that a split can
     /// never have to propagate up through a full node.
     fn descend(&mut self, tree: u64, key: Key, need: usize) -> Result<(MutPath, bool)> {
-        if need + LEAF_ITEM > self.leaf_data_size() {
+        if need > self.leaf_data_size() {
             return bad("item larger than a leaf");
         }
         'retry: loop {
@@ -185,7 +185,7 @@ impl Fs {
                 }
             }
             let found = lo < n && item_key(b, lo) == key;
-            if need > 0 && !found && self.leaf_free(b) < need + LEAF_ITEM {
+            if need > 0 && !found && self.leaf_free(b) < need {
                 if root.level == 0 {
                     self.grow_root(tree, root)?;
                     continue 'retry;
@@ -245,7 +245,7 @@ impl Fs {
 
     /// Inserts an item. The key must not exist.
     pub fn insert_item(&mut self, tree: u64, key: Key, data: &[u8]) -> Result<()> {
-        let (path, found) = self.descend(tree, key, data.len())?;
+        let (path, found) = self.descend(tree, key, data.len() + LEAF_ITEM)?;
         if found {
             return bad(format!("duplicate key {key:?} in tree {tree}"));
         }

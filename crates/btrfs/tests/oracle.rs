@@ -73,6 +73,37 @@ fn check(img: &Path, ctx: &str) {
     );
 }
 
+
+/// `btrfs check` finds a filesystem's other devices through the kernel, so multi-device
+/// volumes go through loop devices.
+fn check_all(imgs: &[PathBuf], ctx: &str) {
+    if imgs.len() == 1 {
+        return check(&imgs[0], ctx);
+    }
+    let run = |args: &[&std::ffi::OsStr]| Command::new("sudo").args(args).output().unwrap();
+    let loops: Vec<String> = imgs
+        .iter()
+        .map(|p| {
+            let o = run(&["losetup".as_ref(), "-f".as_ref(), "--show".as_ref(), p.as_os_str()]);
+            String::from_utf8_lossy(&o.stdout).trim().to_string()
+        })
+        .collect();
+    for l in &loops {
+        run(&["btrfs".as_ref(), "device".as_ref(), "scan".as_ref(), l.as_ref()]);
+    }
+    let o = run(&["btrfs".as_ref(), "check".as_ref(), "--check-data-csum".as_ref(), loops[0].as_ref()]);
+    for l in &loops {
+        run(&["losetup".as_ref(), "-d".as_ref(), l.as_ref()]);
+    }
+    assert!(
+        o.status.success(),
+        "{ctx}: btrfs check exit {:?}\n{}\n{}",
+        o.status.code(),
+        String::from_utf8_lossy(&o.stdout),
+        String::from_utf8_lossy(&o.stderr)
+    );
+}
+
 fn open(imgs: &[PathBuf], opts: MountOpts) -> Btrfs {
     let devs: Vec<Arc<dyn BlockDev>> =
         imgs.iter().map(|p| Arc::new(FileDev::open(p, opts.write).unwrap()) as Arc<dyn BlockDev>).collect();
@@ -137,7 +168,7 @@ fn round(tag: &str, devices: usize, args: &[&str]) {
         populate(&fs, &want);
         fs.unmount().unwrap();
         drop(fs);
-        check(&imgs[0], &format!("{tag}: populated"));
+        check_all(&imgs, &format!("{tag}: populated"));
     }
 
     let fs = open(&imgs, RO);
@@ -155,7 +186,7 @@ fn round(tag: &str, devices: usize, args: &[&str]) {
         assert_same(&walk(&fs).unwrap(), &model.tree(), &format!("{tag}: live pass {pass}"));
         fs.unmount().unwrap();
         drop(fs);
-        check(&imgs[0], &format!("{tag}: pass {pass}"));
+        check_all(&imgs, &format!("{tag}: pass {pass}"));
         let fs = open(&imgs, RO);
         assert_same(&walk(&fs).unwrap(), &model.tree(), &format!("{tag}: reread pass {pass}"));
         let rep = fs.scrub(&mut |_, _| {}).unwrap();
