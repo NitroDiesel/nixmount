@@ -3,6 +3,11 @@
 # images it leaves behind go to the Linux job, where e2fsck and btrfs check judge them.
 param([string]$Exe, [string]$Out)
 $ErrorActionPreference = 'Stop'
+trap {
+    "TRAPPED: $_"
+    $_.InvocationInfo.PositionMessage
+    exit 1
+}
 New-Item -ItemType Directory -Force $Out | Out-Null
 $Out = (Resolve-Path $Out).Path
 $driver = "${env:ProgramFiles(x86)}\WinFsp\bin\winfsp-x64.dll"
@@ -14,6 +19,7 @@ $link = "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\NixMount.lnk"
 function NixMount {
     $ErrorActionPreference = 'Continue'
     & $Exe @args 2>&1 | Out-Host
+    "  exit code $LASTEXITCODE from: $args" | Out-Host
     if ($LASTEXITCODE) { throw "nixmount $args failed with $LASTEXITCODE" }
 }
 
@@ -148,11 +154,14 @@ try {
     [void](Wait-For { Test-Path 'J:\hello.txt' })
     $disk = (Get-DiskImage -ImagePath $vhd).Number
     NixMount unmount 'J:'
+    "step: automount off"
     NixMount automount off "${disk}:${part}"
+    "step: automount off done"
 } finally {
     Dismount-DiskImage -ImagePath $vhd | Out-Null
 }
 
+"step: reading the partition back"
 # Hand the partition's contents to the Linux job.
 $f = [IO.File]::OpenRead($vhd)
 [void]$f.Seek($offset, 'Begin')
@@ -162,6 +171,7 @@ $f.Close()
 [IO.File]::WriteAllBytes("$Out\ext4-raw.img", $back)
 Remove-Item $vhd, $create
 
+"step: uninstall"
 # Uninstalling reverses all of it, including the driver setup brought.
 NixMount uninstall
 Check 'uninstall removed the service' (-not (Get-Service NixMount -ErrorAction SilentlyContinue))

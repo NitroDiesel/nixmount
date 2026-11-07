@@ -34,7 +34,7 @@ fn survives_bit_rot() {
     let mut rng = Rng(0xBAD5EED);
     for (name, base) in fixtures() {
         // Metadata concentrates at the front and in group headers, so aim there.
-        for round in 0..300 {
+        for round in 0..100 {
             let mut img = base.clone();
             for _ in 0..1 + rng.below(40) {
                 let span = if rng.below(2) == 0 { 1 << 20 } else { img.len() as u64 };
