@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 #[test]
 fn replays_linux_journal() {
-    let Ok(out) = std::env::var("CAUSEWAY_OUT") else { return };
+    let Ok(out) = std::env::var("NIXMOUNT_OUT") else { return };
     let path = std::path::Path::new(&out).join("dirty.img");
     let Ok(img) = std::fs::read(&path) else { return };
 

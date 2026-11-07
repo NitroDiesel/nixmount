@@ -1,6 +1,6 @@
 #include <winver.h>
 
-1 ICON "causeway.ico"
+1 ICON "nixmount.ico"
 1 24 "app.manifest"
 
 VS_VERSION_INFO VERSIONINFO
@@ -13,8 +13,8 @@ BEGIN
   BEGIN
     BLOCK "040904B0"
     BEGIN
-      VALUE "FileDescription", "Causeway"
-      VALUE "ProductName", "Causeway"
+      VALUE "FileDescription", "NixMount"
+      VALUE "ProductName", "NixMount"
       VALUE "FileVersion", "0.1.0"
       VALUE "ProductVersion", "0.1.0"
       VALUE "LegalCopyright", "GPL-2.0-only"

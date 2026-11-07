@@ -9,22 +9,22 @@ removes:
 - New drivers need Microsoft's attestation signing to load under Secure Boot.
 - Nothing about a kernel driver can be tested without a machine to crash.
 
-Causeway keeps all filesystem logic in an ordinary process and uses [WinFsp], an existing signed
+NixMount keeps all filesystem logic in an ordinary process and uses [WinFsp], an existing signed
 driver, to forward Windows file requests to it. The price is a process hop per request. In
 exchange a panic fails one request, the engines contain no `unsafe`, and they run unchanged on
 Linux, where they can be judged by real tools.
 
-WinFsp is the only way to get this that gives a real filesystem. A driver of Causeway's own would
+WinFsp is the only way to get this that gives a real filesystem. A driver of NixMount's own would
 need attestation signing and bring back everything above. Serving a loopback WebDAV or SMB share
 has no real file semantics, and WebDAV caps files at about 4 GB. ProjFS and Cloud Files don't give
 a drive letter. So WinFsp's signed, unmodified installer ships inside the executable.
 
 ## Setup
 
-`causeway.exe` is its own installer: `install.rs` handles install, upgrade and uninstall, with the
+`nixmount.exe` is its own installer: `install.rs` handles install, upgrade and uninstall, with the
 WinFsp MSI embedded through `include_bytes!`. The MSI stays on disk in the executable and is only
 paged in during setup, so it costs no memory while running. A copy kept in the program folder
-marks that Causeway installed WinFsp, which is how uninstalling knows whether to remove it.
+marks that NixMount installed WinFsp, which is how uninstalling knows whether to remove it.
 
 To update WinFsp, replace `app/res/winfsp-*.msi` with a new release, checking its signature, and
 change the path in `install.rs`.

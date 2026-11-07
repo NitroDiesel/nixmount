@@ -6,7 +6,8 @@ members = ["crates/fscore", "crates/ext4", "crates/btrfs", "app"]
 version = "0.1.0"
 edition = "2021"
 license = "GPL-2.0-only"
-repository = "https://github.com/NitroDiesel/causeway"
+authors = ["NitroDiesel", "Claude <noreply@anthropic.com>"]
+repository = "https://github.com/NitroDiesel/nixmount"
 
 [profile.release]
 opt-level = 3

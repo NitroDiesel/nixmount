@@ -1,5 +1,5 @@
 //! Saved state: which volumes mount automatically, and remembered image files.
-//! Lives in `%ProgramData%\Causeway`, writable only by administrators and SYSTEM.
+//! Lives in `%ProgramData%\NixMount`, writable only by administrators and SYSTEM.
 use crate::mounts::MountRequest;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -21,7 +21,7 @@ pub struct Config {
 
 fn dir() -> PathBuf {
     let base = std::env::var_os("ProgramData").map_or_else(|| PathBuf::from(r"C:\ProgramData"), PathBuf::from);
-    base.join("Causeway")
+    base.join("NixMount")
 }
 
 fn path() -> PathBuf {

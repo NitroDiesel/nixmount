@@ -19,7 +19,7 @@ use windows_sys::Win32::System::Pipes::{
     PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
 };
 
-const PIPE: &str = r"\\.\pipe\causeway";
+const PIPE: &str = r"\\.\pipe\nixmount";
 /// Requests are small; refusing anything large caps what a client can make us allocate.
 const MAX_MESSAGE: usize = 4 << 20;
 

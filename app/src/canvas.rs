@@ -54,10 +54,12 @@ pub enum Font {
     Heading,
     Icon,
     IconLarge,
+    IconSmall,
+    IconHero,
 }
 
-const FONTS: [Font; 7] =
-    [Font::Small, Font::Body, Font::Strong, Font::Title, Font::Heading, Font::Icon, Font::IconLarge];
+const FONTS: [Font; 9] =
+    [Font::Small, Font::Body, Font::Strong, Font::Title, Font::Heading, Font::Icon, Font::IconLarge, Font::IconSmall, Font::IconHero];
 
 pub struct Canvas {
     pub w: i32,
@@ -66,7 +68,7 @@ pub struct Canvas {
     dc: HDC,
     bmp: HBITMAP,
     bits: *mut u32,
-    fonts: [HFONT; 7],
+    fonts: [HFONT; 9],
 }
 
 fn wide(s: &str) -> Vec<u16> {
@@ -77,17 +79,40 @@ impl Canvas {
     pub fn new(w: i32, h: i32, scale: f32) -> Canvas {
         // SAFETY: a memory DC compatible with the screen.
         let dc = unsafe { CreateCompatibleDC(null_mut()) };
-        let mut c = Canvas { w: 0, h: 0, scale, dc, bmp: null_mut(), bits: null_mut(), fonts: [null_mut(); 7] };
+        let mut c = Canvas { w: 0, h: 0, scale, dc, bmp: null_mut(), bits: null_mut(), fonts: [null_mut(); 9] };
         c.make_fonts();
         c.resize(w, h);
         c
     }
 
+    /// Whether a font family is installed. Windows 10 lacks the newer Segoe families, and
+    /// GDI's own fallback for a missing icon font draws empty boxes.
+    fn has_font(&self, name: &str) -> bool {
+        unsafe extern "system" fn found(_: *const LOGFONTW, _: *const TEXTMETRICW, _: u32, flag: isize) -> i32 {
+            // SAFETY: `flag` is the bool passed below, alive for the call.
+            unsafe { *(flag as *mut bool) = true };
+            0
+        }
+        // SAFETY: an all-zero LOGFONTW is valid before its fields are set.
+        let mut lf: LOGFONTW = unsafe { std::mem::zeroed() };
+        lf.lfCharSet = DEFAULT_CHARSET;
+        for (d, s) in lf.lfFaceName.iter_mut().zip(name.encode_utf16().take(31)) {
+            *d = s;
+        }
+        let mut seen = false;
+        // SAFETY: `lf` and `seen` outlive the call.
+        unsafe { EnumFontFamiliesExW(self.dc, &lf, Some(found), (&raw mut seen) as isize, 0) };
+        seen
+    }
+
     fn make_fonts(&mut self) {
-        let family = |name: &str| -> Vec<u16> { name.encode_utf16().chain([0]).collect() };
-        let text = family("Segoe UI Variable Text");
-        let display = family("Segoe UI Variable Display");
-        let icons = family("Segoe Fluent Icons");
+        let family = |wanted: &str, fallback: &str| -> Vec<u16> {
+            let name = if self.has_font(wanted) { wanted } else { fallback };
+            name.encode_utf16().chain([0]).collect()
+        };
+        let text = family("Segoe UI Variable Text", "Segoe UI");
+        let display = family("Segoe UI Variable Display", "Segoe UI");
+        let icons = family("Segoe Fluent Icons", "Segoe MDL2 Assets");
         for (i, f) in FONTS.iter().enumerate() {
             let (px, weight, face) = match f {
                 Font::Small => (12.0, 400, &text),
@@ -97,6 +122,8 @@ impl Canvas {
                 Font::Title => (24.0, 600, &display),
                 Font::Icon => (16.0, 400, &icons),
                 Font::IconLarge => (20.0, 400, &icons),
+                Font::IconSmall => (10.0, 400, &icons),
+                Font::IconHero => (40.0, 400, &icons),
             };
             let h = -(px * self.scale).round() as i32;
             // SAFETY: `face` is NUL-terminated; GDI falls back if the family is missing.
@@ -203,6 +230,30 @@ impl Canvas {
         self.round(r.inset(t), (radius - t).max(0), fill);
     }
 
+    /// An antialiased outline following a rounded rectangle's edge, drawn inside `r`.
+    pub fn ring(&mut self, r: Rect, radius: i32, width: i32, c: Color) {
+        let (w, h) = (self.w, self.h);
+        let (hw, hh) = (r.w as f32 / 2.0, r.h as f32 / 2.0);
+        let (cx, cy) = (r.x as f32 + hw, r.y as f32 + hh);
+        let rad = (radius as f32).min(hw).min(hh);
+        let t = width as f32;
+        let p = self.pixels();
+        for y in r.y.max(0)..r.bottom().min(h) {
+            for x in r.x.max(0)..r.right().min(w) {
+                // Signed distance to the edge: negative inside.
+                let qx = (x as f32 + 0.5 - cx).abs() - hw + rad;
+                let qy = (y as f32 + 0.5 - cy).abs() - hh + rad;
+                let outside = (qx.max(0.0).powi(2) + qy.max(0.0).powi(2)).sqrt();
+                let d = outside + qx.max(qy).min(0.0) - rad;
+                let cov = (0.5 - d).clamp(0.0, 1.0) * (0.5 + d + t).clamp(0.0, 1.0);
+                if cov > 0.0 {
+                    let i = (y * w + x) as usize;
+                    p[i] = blend(p[i], c, (cov * 255.0) as u32);
+                }
+            }
+        }
+    }
+
     pub fn circle(&mut self, cx: i32, cy: i32, radius: i32, c: Color) {
         self.round(Rect::new(cx - radius, cy - radius, radius * 2, radius * 2), radius, c);
     }
@@ -228,6 +279,11 @@ impl Canvas {
 
     /// Single-line text in `r`, vertically centred and truncated with an ellipsis.
     pub fn text(&mut self, r: Rect, s: &str, f: Font, c: Color, center: bool) {
+        // DrawTextW reads through the pointer even for a zero length, and an empty Vec's
+        // pointer is dangling.
+        if s.is_empty() {
+            return;
+        }
         self.select(f, c);
         let mut t = wide(s);
         let mut rc = RECT { left: r.x, top: r.y, right: r.right(), bottom: r.bottom() };
@@ -237,8 +293,36 @@ impl Canvas {
         unsafe { DrawTextW(self.dc, t.as_mut_ptr(), t.len() as i32, &mut rc, flags) };
     }
 
+    /// Single-line text aligned to the right edge of `r`, so numbers line up in a column.
+    pub fn text_right(&mut self, r: Rect, s: &str, f: Font, c: Color) {
+        if s.is_empty() {
+            return;
+        }
+        self.select(f, c);
+        let mut t = wide(s);
+        let mut rc = RECT { left: r.x, top: r.y, right: r.right(), bottom: r.bottom() };
+        let flags = DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX | DT_RIGHT;
+        // SAFETY: `t` is valid and DrawTextW only reads it without DT_MODIFYSTRING.
+        unsafe { DrawTextW(self.dc, t.as_mut_ptr(), t.len() as i32, &mut rc, flags) };
+    }
+
+    /// Height `s` takes when wrapped to `width`, without drawing it.
+    pub fn wrapped_height(&self, s: &str, f: Font, width: i32) -> i32 {
+        if s.is_empty() {
+            return 0;
+        }
+        self.select(f, 0);
+        let mut t = wide(s);
+        let mut rc = RECT { left: 0, top: 0, right: width, bottom: 0 };
+        // SAFETY: as in `text`; DT_CALCRECT only measures.
+        unsafe { DrawTextW(self.dc, t.as_mut_ptr(), t.len() as i32, &mut rc, DT_WORDBREAK | DT_NOPREFIX | DT_CALCRECT) }
+    }
+
     /// Word-wrapped text from the top of `r`. Returns the height used.
     pub fn paragraph(&mut self, r: Rect, s: &str, f: Font, c: Color) -> i32 {
+        if s.is_empty() {
+            return 0;
+        }
         self.select(f, c);
         let mut t = wide(s);
         let mut rc = RECT { left: r.x, top: r.y, right: r.right(), bottom: r.bottom() };

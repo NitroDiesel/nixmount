@@ -9,7 +9,7 @@ use std::process::Command;
 use std::sync::Arc;
 
 fn dir() -> Option<PathBuf> {
-    std::env::var("CAUSEWAY_OUT").ok().map(PathBuf::from)
+    std::env::var("NIXMOUNT_OUT").ok().map(PathBuf::from)
 }
 
 fn open(p: &Path, write: bool) -> Btrfs {

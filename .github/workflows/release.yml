@@ -13,13 +13,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --release --locked -p causeway
+      - run: cargo build --release --locked -p nixmount
       - name: Publish
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          Copy-Item target/release/causeway.exe Causeway-Setup.exe
-          (Get-FileHash Causeway-Setup.exe -Algorithm SHA256).Hash.ToLower() + '  Causeway-Setup.exe' |
-              Set-Content Causeway-Setup.exe.sha256
-          gh release create $env:GITHUB_REF_NAME Causeway-Setup.exe Causeway-Setup.exe.sha256 --generate-notes
+          Copy-Item target/release/nixmount.exe NixMount-Setup.exe
+          (Get-FileHash NixMount-Setup.exe -Algorithm SHA256).Hash.ToLower() + '  NixMount-Setup.exe' |
+              Set-Content NixMount-Setup.exe.sha256
+          gh release create $env:GITHUB_REF_NAME NixMount-Setup.exe NixMount-Setup.exe.sha256 --generate-notes

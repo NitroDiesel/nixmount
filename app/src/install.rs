@@ -16,7 +16,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 /// The unmodified, Authenticode-signed installer from the WinFsp project. It stays in the
 /// executable's image and is only paged in during setup, so it costs no memory at run time.
 const WINFSP_MSI: &[u8] = include_bytes!("../res/winfsp-2.1.25156.msi");
-const UNINSTALL_KEY: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Causeway";
+const UNINSTALL_KEY: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\NixMount";
 
 fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain([0]).collect()
@@ -49,7 +49,7 @@ pub fn relaunch_elevated(args: &str) -> bool {
 
 fn program_dir() -> Result<PathBuf, String> {
     let base = std::env::var_os("ProgramW6432").or_else(|| std::env::var_os("ProgramFiles"));
-    Ok(PathBuf::from(base.ok_or("no Program Files directory")?).join("Causeway"))
+    Ok(PathBuf::from(base.ok_or("no Program Files directory")?).join("NixMount"))
 }
 
 /// Windows' own system folder, asked of Windows: tools run elevated must not come from a
@@ -63,14 +63,14 @@ pub fn system_dir() -> PathBuf {
 
 fn start_menu_link() -> PathBuf {
     let base = std::env::var_os("ProgramData").map_or_else(|| PathBuf::from(r"C:\ProgramData"), PathBuf::from);
-    base.join(r"Microsoft\Windows\Start Menu\Programs\Causeway.lnk")
+    base.join(r"Microsoft\Windows\Start Menu\Programs\NixMount.lnk")
 }
 
 /// Runs WinFsp's installer if the driver isn't already there.
 ///
 /// The MSI is written into the program folder, not a temporary one. It runs elevated, and in
 /// a folder an ordinary user can write to, it could be swapped between writing and running.
-/// A copy left behind also records that Causeway installed WinFsp, so uninstalling knows
+/// A copy left behind also records that NixMount installed WinFsp, so uninstalling knows
 /// whether it is ours to remove.
 fn ensure_winfsp(dir: &Path) -> Result<(), String> {
     if winfsp::driver_present() {
@@ -107,7 +107,7 @@ fn set_number(key: HKEY, name: &str, value: u32) {
     unsafe { RegSetValueExW(key, n.as_ptr(), 0, REG_DWORD, (&raw const value).cast(), 4) };
 }
 
-/// Lists Causeway in Settings, under installed apps.
+/// Lists NixMount in Settings, under installed apps.
 fn register_uninstaller(exe: &Path, dir: &Path) -> Result<(), String> {
     let path = wide(UNINSTALL_KEY);
     let mut key = null_mut();
@@ -119,9 +119,9 @@ fn register_uninstaller(exe: &Path, dir: &Path) -> Result<(), String> {
         return Err(format!("could not register the uninstaller ({rc})"));
     }
     let size = std::fs::metadata(exe).map_or(0, |m| m.len() / 1024) as u32;
-    set_string(key, "DisplayName", "Causeway");
+    set_string(key, "DisplayName", "NixMount");
     set_string(key, "DisplayVersion", env!("CARGO_PKG_VERSION"));
-    set_string(key, "Publisher", "Causeway contributors");
+    set_string(key, "Publisher", "NixMount contributors");
     set_string(key, "DisplayIcon", &exe.display().to_string());
     set_string(key, "InstallLocation", &dir.display().to_string());
     set_string(key, "UninstallString", &format!("\"{}\" uninstall", exe.display()));
@@ -148,7 +148,7 @@ fn create_shortcut(exe: &Path) {
 /// Installs or upgrades everything. Safe to run again: each step keeps what is already right.
 pub fn install() -> Result<(), String> {
     let dir = program_dir()?;
-    let dest = dir.join("causeway.exe");
+    let dest = dir.join("nixmount.exe");
     let this = std::env::current_exe().map_err(|e| e.to_string())?;
     config::secure_directory()?;
     // An upgrade has to stop the running copy. Its mounts close cleanly on the way.
@@ -181,7 +181,7 @@ fn replace_program(from: &Path, to: &Path) -> Result<(), String> {
     Err(format!("could not copy to {}: {}", to.display(), last.map_or_else(String::new, |e| e.to_string())))
 }
 
-/// Removes everything `install` added, including WinFsp if Causeway was what installed it.
+/// Removes everything `install` added, including WinFsp if NixMount was what installed it.
 /// If another program brought WinFsp, it stays.
 pub fn uninstall() -> Result<(), String> {
     let dir = program_dir()?;
@@ -210,7 +210,7 @@ pub fn uninstall() -> Result<(), String> {
 /// Deletes the program folder. A running program can't delete itself, so when uninstalling
 /// from the installed copy a short-lived shell finishes the job after this process exits.
 fn remove_program(dir: &Path) -> Result<(), String> {
-    let exe = dir.join("causeway.exe");
+    let exe = dir.join("nixmount.exe");
     if std::env::current_exe().map_err(|e| e.to_string())? == exe {
         let cmd = format!("/C ping -n 3 127.0.0.1 >NUL & del /F /Q \"{}\" & rmdir \"{}\"", exe.display(), dir.display());
         return Command::new(system_dir().join("cmd.exe"))

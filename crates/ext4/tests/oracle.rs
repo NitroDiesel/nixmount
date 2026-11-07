@@ -1,7 +1,7 @@
 #![cfg(unix)]
 //! Judges the engine against the real tools. Needs `mke2fs`/`e2fsck`, so it runs on the
 //! Linux CI job; elsewhere each test skips. Images and the expected trees are left in
-//! `$CAUSEWAY_OUT` for `ci/kernel-check.sh`, which has the Linux kernel read them.
+//! `$NIXMOUNT_OUT` for `ci/kernel-check.sh`, which has the Linux kernel read them.
 use ext4::Ext4;
 use fscore::testkit::*;
 use fscore::{Filesystem, FileDev, MemDev, MountOpts};
@@ -17,7 +17,7 @@ fn have_tools() -> bool {
 }
 
 fn out_dir() -> PathBuf {
-    let d = std::env::var("CAUSEWAY_OUT").map_or_else(|_| std::env::temp_dir().join("causeway-oracle"), PathBuf::from);
+    let d = std::env::var("NIXMOUNT_OUT").map_or_else(|_| std::env::temp_dir().join("nixmount-oracle"), PathBuf::from);
     std::fs::create_dir_all(&d).unwrap();
     d
 }

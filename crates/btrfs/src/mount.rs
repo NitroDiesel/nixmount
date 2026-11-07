@@ -175,12 +175,12 @@ impl Btrfs {
                 return Err(FsError::Invalid("devices belong to different filesystems"));
             }
             if s.u64_at(0x48) != sb.u64_at(0x48) {
-                reasons.push("member devices are at different generations".into());
+                reasons.push("Member devices are at different generations".into());
             }
             devs.insert(s.u64_at(0xC9), d);
         }
         if devs.len() as u64 != sb.u64_at(0x88) {
-            reasons.push(format!("degraded: {} of {} devices present", devs.len(), sb.u64_at(0x88)));
+            reasons.push(format!("Degraded: {} of {} devices are present", devs.len(), sb.u64_at(0x88)));
         }
         let cache_bytes = if opts.cache_bytes == 0 { 32 << 20 } else { opts.cache_bytes };
         let mut fs = Fs {
@@ -210,32 +210,32 @@ impl Btrfs {
         fs.find_default_subvol()?;
 
         if fs.sb.u64_at(0x60) != 0 {
-            fs.notes.push("unclean shutdown: fsync log ignored, the last moments of writes may be missing".into());
-            reasons.push("a tree log is pending: mount once in Linux to replay it".into());
+            fs.notes.push("Not cleanly unmounted: the last moments of writes may be missing".into());
+            reasons.push("A tree log is pending. Mount it once in Linux to replay it".into());
         }
         if compat_ro & !RO_KNOWN != 0 {
-            reasons.push(format!("unknown read-only features {:#x}", compat_ro & !RO_KNOWN));
+            reasons.push(format!("Unknown read-only features {:#x}", compat_ro & !RO_KNOWN));
         }
         if compat_ro & RO_VERITY != 0 {
-            reasons.push("verity: protected files must stay untouched".into());
+            reasons.push("Holds verity-protected files, which must stay untouched".into());
         }
         if incompat & IN_MIXED_GROUPS != 0 {
-            reasons.push("mixed block groups aren't writable yet".into());
+            reasons.push("Mixed block groups can't be written yet".into());
         }
         if incompat & IN_SIMPLE_QUOTA != 0 {
-            reasons.push("simple quotas would go stale".into());
+            reasons.push("Simple quotas are on, and writing would leave them out of date".into());
         }
         if compat_ro & RO_FREE_SPACE_TREE != 0 && compat_ro & RO_FREE_SPACE_TREE_VALID == 0 {
-            reasons.push("the free space tree is marked invalid".into());
+            reasons.push("The free space tree is marked invalid".into());
         }
         if fs.chunks.values().any(|c| c.ty & (RAID5 | RAID6) != 0) {
-            reasons.push("RAID5/6 volumes are read-only here: the write hole risks data on a crash".into());
+            reasons.push("RAID5 and RAID6 stay read-only here, because a crash during a write can lose data".into());
         }
         if fs.root_item(QUOTA_TREE).is_ok() {
-            reasons.push("quotas are enabled: writing would leave qgroup accounting stale".into());
+            reasons.push("Quotas are on, and writing would leave them out of date".into());
         }
         if opts.write && fs.devs.values().any(|d| !d.writable()) {
-            reasons.push("a device was opened read-only".into());
+            reasons.push("A device was opened read-only".into());
         }
         fs.read_only = !opts.write || !reasons.is_empty();
         fs.ro_reasons = reasons;

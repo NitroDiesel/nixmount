@@ -12,7 +12,9 @@ use std::sync::Arc;
 use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::Graphics::Dwm::*;
 use windows_sys::Win32::Graphics::Gdi::*;
-use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows_sys::Win32::System::LibraryLoader::{
+    GetModuleHandleW, GetProcAddress, LoadLibraryExW, LOAD_LIBRARY_SEARCH_SYSTEM32,
+};
 use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
 use windows_sys::Win32::UI::Controls::Dialogs::*;
 use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
@@ -128,7 +130,7 @@ enum Service {
 
 /// A read-only file browser that needs neither WinFsp nor the service.
 struct Browser {
-    fs: Arc<dyn Filesystem>,
+    fs: Option<Arc<dyn Filesystem>>,
     target: Target,
     path: Vec<String>,
     rows: Vec<Row>,
@@ -179,6 +181,10 @@ struct App {
     browser: Option<Browser>,
     scrub: Option<ScrubState>,
     scanned: bool,
+    side_scroll: usize,
+    side_max: usize,
+    detail_scroll: i32,
+    detail_max: i32,
 }
 
 /// `Send` wrapper so workers can post back to the window.
@@ -207,8 +213,9 @@ fn human(n: u64) -> String {
     let units = ["B", "KB", "MB", "GB", "TB", "PB"];
     let mut v = n as f64;
     let mut u = 0;
-    while v >= 1000.0 && u + 1 < units.len() {
-        v /= 1000.0;
+    // 1024-based with these labels, to match what Explorer shows for the same volume.
+    while v >= 1024.0 && u + 1 < units.len() {
+        v /= 1024.0;
         u += 1;
     }
     if u == 0 {
@@ -246,7 +253,30 @@ impl App {
         unsafe { InvalidateRect(self.hwnd, null(), 0) };
     }
 
+    /// Native menus ignore the window's theme unless asked. These two entry points have no
+    /// names, only ordinals, but they are what Windows' own dark apps use; on a system without
+    /// them the menu simply stays light.
+    fn theme_menus(&self) {
+        let name: Vec<u16> = "uxtheme.dll\0".encode_utf16().collect();
+        // SAFETY: the module comes from System32, and these ordinals take the arguments below.
+        unsafe {
+            let m = LoadLibraryExW(name.as_ptr(), null_mut(), LOAD_LIBRARY_SEARCH_SYSTEM32);
+            if m.is_null() {
+                return;
+            }
+            if let Some(f) = GetProcAddress(m, 135 as *const u8) {
+                let set: unsafe extern "system" fn(i32) -> i32 = std::mem::transmute(f);
+                set(if self.dark { 2 } else { 3 });
+            }
+            if let Some(f) = GetProcAddress(m, 136 as *const u8) {
+                let flush: unsafe extern "system" fn() = std::mem::transmute(f);
+                flush();
+            }
+        }
+    }
+
     fn apply_title_bar(&self) {
+        self.theme_menus();
         let dark = self.dark as i32;
         let caption = self.theme().side;
         let bgr = ((caption & 0xFF) << 16) | (caption & 0xFF00) | ((caption >> 16) & 0xFF);
@@ -330,12 +360,17 @@ impl App {
     }
 
     fn act(&mut self, a: Act) {
+        // One action at a time, while still letting people look around.
+        if self.busy.is_some() && !matches!(a, Act::Select(_) | Act::Dismiss | Act::WinFspHome) {
+            return;
+        }
         match a {
             Act::Select(i) => {
                 self.selected = i;
                 self.browser = None;
                 self.banner = None;
                 self.scrub = None;
+                self.detail_scroll = 0;
             }
             Act::AddImage => self.add_image(),
             Act::Refresh => {
@@ -501,7 +536,7 @@ impl App {
         let w = self.wnd();
         std::thread::spawn(move || match volumes::open(&v.target, MountOpts::default()) {
             Ok(fs) => {
-                let mut b = Browser { fs, target: v.target, path: vec![], rows: vec![], scroll: 0, selected: None };
+                let mut b = Browser { fs: Some(fs), target: v.target, path: vec![], rows: vec![], scroll: 0, selected: None };
                 list_into(&mut b);
                 w.post(Msg::Browser(Box::new(b)));
             }
@@ -548,7 +583,7 @@ impl App {
         self.set_busy("Installing…");
         let w = self.wnd();
         std::thread::spawn(move || match crate::install::install() {
-            Ok(()) => w.post(Msg::Done { note: Some("Causeway is installed and ready".into()) }),
+            Ok(()) => w.post(Msg::Done { note: Some("NixMount is installed and ready".into()) }),
             Err(e) => w.post(Msg::Failed(e)),
         });
     }
@@ -649,6 +684,12 @@ impl App {
         let t = self.theme();
         let hot = self.hover.as_ref() == Some(&act);
         let radius = self.canvas.px(6.0);
+        // One action at a time: a double click can't start a second mount.
+        if self.busy.is_some() {
+            self.canvas.card(r, radius, t.card, t.line);
+            self.canvas.text(r, label, Font::Body, t.muted, true);
+            return;
+        }
         if primary {
             self.canvas.round(r, radius, t.accent);
             self.canvas.text(r, label, Font::Strong, t.on_accent, true);
@@ -660,17 +701,25 @@ impl App {
         self.region(r, act);
     }
 
+    /// A square button holding one glyph.
+    fn glyph_button(&mut self, r: Rect, glyph: &str, act: Act, enabled: bool) {
+        let t = self.theme();
+        let hot = enabled && self.hover.as_ref() == Some(&act);
+        self.canvas.card(r, self.canvas.px(6.0), if hot { t.hover } else { t.card }, t.line);
+        self.canvas.text(r, glyph, Font::Icon, if enabled { t.text } else { t.line }, true);
+        if enabled {
+            self.region(r, act);
+        }
+    }
+
     fn region(&mut self, rect: Rect, act: Act) {
         let focused = self.focus == Some(self.regions.len());
         self.regions.push(Region { rect, act });
         if focused {
             let t = self.theme();
-            let w = self.canvas.px(2.0).max(1);
-            let (c, x, y, ww, h) = (t.accent, rect.x, rect.y, rect.w, rect.h);
-            self.canvas.fill(Rect::new(x, y, ww, w), c);
-            self.canvas.fill(Rect::new(x, y + h - w, ww, w), c);
-            self.canvas.fill(Rect::new(x, y, w, h), c);
-            self.canvas.fill(Rect::new(x + ww - w, y, w, h), c);
+            let (gap, w) = (self.canvas.px(2.0), self.canvas.px(2.0).max(1));
+            let outer = rect.inset(-gap);
+            self.canvas.ring(outer, self.canvas.px(8.0), w, t.accent);
         }
     }
 
@@ -679,17 +728,17 @@ impl App {
         let (sw, sh) = (self.canvas.px(36.0), self.canvas.px(20.0));
         let sy = r.y + self.canvas.px(2.0);
         let track = Rect::new(r.x, sy, sw, sh);
-        let fill = if !enabled {
-            t.track
-        } else if on {
-            t.accent
-        } else {
-            t.muted
-        };
-        self.canvas.round(track, sh / 2, fill);
-        let knob = sh / 2 - self.canvas.px(3.0);
+        let knob = sh / 2 - self.canvas.px(4.0);
         let kx = if on { track.right() - sh / 2 } else { track.x + sh / 2 };
-        self.canvas.circle(kx, track.y + sh / 2, knob, if enabled { t.card } else { t.muted });
+        // Off is an outline and on is solid, so the state reads without comparing the two.
+        if on && enabled {
+            self.canvas.round(track, sh / 2, t.accent);
+            self.canvas.circle(kx, track.y + sh / 2, knob, t.on_accent);
+        } else {
+            let line = if enabled { t.muted } else { t.line };
+            self.canvas.card(track, sh / 2, t.card, line);
+            self.canvas.circle(kx, track.y + sh / 2, knob, line);
+        }
         let tx = r.x + sw + self.canvas.px(12.0);
         let tw = r.right() - tx;
         let color = if enabled { t.text } else { t.muted };
@@ -701,6 +750,20 @@ impl App {
         if enabled {
             self.region(r, act);
         }
+    }
+
+    /// A thin thumb showing that a list continues, and how far.
+    fn scrollbar(&mut self, x: i32, y: i32, h: i32, offset: i32, visible: i32, total: i32) {
+        if total <= visible || total <= 0 {
+            return;
+        }
+        let t = self.theme();
+        let w = self.canvas.px(3.0).max(2);
+        let thumb = (h as i64 * visible as i64 / total as i64) as i32;
+        let thumb = thumb.max(self.canvas.px(24.0)).min(h);
+        let travel = h - thumb;
+        let at = (travel as i64 * offset as i64 / (total - visible) as i64) as i32;
+        self.canvas.round(Rect::new(x, y + at, w, thumb), w, t.line);
     }
 
     fn pill(&mut self, right: i32, y: i32, label: &str, c: Color) -> i32 {
@@ -737,15 +800,14 @@ impl App {
         let p = |c: &Canvas, v: f32| c.px(v);
         let pad = p(&self.canvas, 16.0);
         let row_h = p(&self.canvas, 56.0);
+        let step = row_h + p(&self.canvas, 2.0);
         let x = r.x + pad;
         let cw = r.w - pad * 2;
-        let mut y = p(&self.canvas, 18.0);
-        self.canvas.text(Rect::new(x, y, cw, p(&self.canvas, 28.0)), "Causeway", Font::Heading, t.text, false);
-        y += p(&self.canvas, 40.0);
-        self.canvas.text(Rect::new(x, y, cw, p(&self.canvas, 18.0)), "Volumes", Font::Small, t.muted, false);
-        y += p(&self.canvas, 24.0);
-        let footer_h = p(&self.canvas, 136.0);
-        let bottom = r.bottom() - footer_h;
+        let mut y = p(&self.canvas, 16.0);
+        self.canvas.text(Rect::new(x, y, cw, p(&self.canvas, 24.0)), "Volumes", Font::Strong, t.text, false);
+        y += p(&self.canvas, 32.0);
+        let list_top = y;
+        let bottom = r.bottom() - p(&self.canvas, 136.0);
         let list: Vec<(String, String, String, bool, bool)> = self
             .volumes
             .iter()
@@ -763,17 +825,19 @@ impl App {
             })
             .collect();
         if list.is_empty() {
-            let msg = if self.busy.is_some() {
-                "Looking for Linux volumes…"
-            } else {
-                "No Linux volumes found. Connect a disk, or add an image file."
-            };
-            self.canvas.paragraph(Rect::new(x, y, cw, bottom - y), msg, Font::Body, t.muted);
+            let msg = if self.busy.is_some() { "Looking…" } else { "None found" };
+            self.canvas.text(Rect::new(x, y, cw, p(&self.canvas, 24.0)), msg, Font::Body, t.muted, false);
         }
-        for (i, (name, sub, icon, mounted, usable)) in list.iter().enumerate() {
-            if y + row_h > bottom {
-                break;
-            }
+        // Keep the selection in view when the keyboard moves it past either end.
+        let fits = ((bottom - list_top) / step).max(1) as usize;
+        self.side_max = list.len().saturating_sub(fits);
+        if self.selected < self.side_scroll {
+            self.side_scroll = self.selected;
+        } else if self.selected >= self.side_scroll + fits {
+            self.side_scroll = self.selected + 1 - fits;
+        }
+        self.side_scroll = self.side_scroll.min(self.side_max);
+        for (i, (name, sub, icon, mounted, usable)) in list.iter().enumerate().skip(self.side_scroll).take(fits) {
             let row = Rect::new(r.x + p(&self.canvas, 8.0), y, r.w - p(&self.canvas, 16.0), row_h);
             let hot = self.hover == Some(Act::Select(i));
             let sel = i == self.selected;
@@ -795,8 +859,11 @@ impl App {
                 self.canvas.circle(row.right() - p(&self.canvas, 12.0), row.y + row.h / 2, radius, t.ok);
             }
             self.region(row, Act::Select(i));
-            y += row_h + p(&self.canvas, 2.0);
+            y += step;
         }
+        let bar_x = r.right() - p(&self.canvas, 6.0);
+        let shown = list.len().min(fits) as i32;
+        self.scrollbar(bar_x, list_top, shown * step, self.side_scroll as i32, shown, list.len() as i32);
         let by = r.bottom() - p(&self.canvas, 128.0);
         let bh = p(&self.canvas, 32.0);
         let half = (cw - p(&self.canvas, 8.0)) / 2;
@@ -804,7 +871,7 @@ impl App {
         self.icon_button(Rect::new(x + half + p(&self.canvas, 8.0), by, half, bh), I_REFRESH, "Refresh", Act::Refresh);
         let sy = by + bh + p(&self.canvas, 12.0);
         let (dot, label) = match (&self.service, self.winfsp) {
-            (Service::Ready, true) => (t.ok, "Service running"),
+            (Service::Ready, true) => (t.ok, "Ready"),
             (Service::Ready, false) => (t.warn, "Driver missing"),
             (Service::Missing, _) => (t.warn, "Not installed yet"),
             (Service::Unknown, _) => (t.muted, "Connecting…"),
@@ -841,7 +908,7 @@ impl App {
             return y;
         }
         let (title, text, label, act) = (
-            "Install Causeway",
+            "Install NixMount",
             "One step sets up the driver and background service that give volumes a drive letter. Everything is \
              included, with nothing else to download.",
             "Install",
@@ -877,30 +944,66 @@ impl App {
         let Some((is_err, msg)) = self.banner.clone() else { return y };
         let c = if is_err { t.bad } else { t.ok };
         let tw = r.w - self.canvas.px(64.0);
-        let (lines, _) = self.canvas.measure(&msg, Font::Body);
-        let rows = (lines / tw.max(1) + 1).min(4);
-        let h = self.canvas.px(16.0) + rows * self.canvas.px(20.0);
+        let h = self.canvas.px(16.0) + self.canvas.wrapped_height(&msg, Font::Body, tw);
         self.canvas.card(Rect::new(r.x, y, r.w, h), radius, t.card, c);
         let pr = Rect::new(r.x + self.canvas.px(14.0), y + self.canvas.px(8.0), tw, h);
         self.canvas.paragraph(pr, &msg, Font::Body, t.text);
         let close = Rect::new(r.right() - self.canvas.px(36.0), y + self.canvas.px(4.0), self.canvas.px(28.0), self.canvas.px(28.0));
-        self.canvas.text(close, I_CLOSE, Font::Small, t.muted, true);
+        self.canvas.text(close, I_CLOSE, Font::IconSmall, t.muted, true);
         self.region(close, Act::Dismiss);
         y + h + self.canvas.px(12.0)
     }
 
     fn paint_details(&mut self, area: Rect) {
-        let t = self.theme();
         let pad = self.canvas.px(28.0);
         let r = Rect::new(area.x + pad, area.y, area.w - pad * 2, area.h);
-        let mut y = self.canvas.px(24.0);
+        let top = self.canvas.px(24.0) - self.detail_scroll;
+        let end = self.details(r, top);
+        // Scrolling only exists when the window is too short for the content.
+        self.detail_max = (end + self.detail_scroll + self.canvas.px(24.0) - area.h).max(0);
+        if self.detail_scroll > self.detail_max {
+            self.detail_scroll = self.detail_max;
+            self.invalidate();
+        }
+        let x = area.right() - self.canvas.px(6.0);
+        self.scrollbar(x, 0, area.h, self.detail_scroll, area.h, area.h + self.detail_max);
+    }
+
+    /// The first thing a new user may see, so it says what to do and offers the way forward.
+    fn empty_state(&mut self, r: Rect, y: i32) -> i32 {
+        let t = self.theme();
+        if self.busy.is_some() {
+            return y;
+        }
+        let block = self.canvas.px(132.0);
+        let top = y.max((r.h - block) / 2);
+        let line = |me: &App, v: f32| me.canvas.px(v);
+        let icon = Rect::new(r.x, top - line(self, 16.0), r.w, line(self, 48.0));
+        self.canvas.text(icon, I_DISK, Font::IconHero, t.muted, true);
+        let title = Rect::new(r.x, top + line(self, 36.0), r.w, line(self, 28.0));
+        self.canvas.text(title, "No Linux volumes found", Font::Heading, t.text, true);
+        let text = Rect::new(r.x, title.bottom(), r.w, line(self, 24.0));
+        self.canvas.text(text, "Connect a disk with an ext or Btrfs volume, or open a disk image.", Font::Body, t.muted, true);
+        let (bw, bh) = (line(self, 128.0), line(self, 36.0));
+        let b = Rect::new(r.x + (r.w - bw) / 2, text.bottom() + line(self, 12.0), bw, bh);
+        self.button(b, "Add image", Act::AddImage, true);
+        b.bottom()
+    }
+
+    /// One label and value on a row of a card. Long values end in an ellipsis.
+    fn fact(&mut self, x: i32, y: i32, width: i32, k: &str, val: &str) {
+        let t = self.theme();
+        let (lw, h) = (self.canvas.px(68.0), self.canvas.px(22.0));
+        self.canvas.text(Rect::new(x, y, lw, h), k, Font::Small, t.muted, false);
+        self.canvas.text(Rect::new(x + lw, y, width - lw, h), val, Font::Small, t.text, false);
+    }
+
+    /// Paints the selected volume from `y` down and returns where it ended.
+    fn details(&mut self, r: Rect, mut y: i32) -> i32 {
+        let t = self.theme();
         y = self.paint_banner(r, y);
         y = self.paint_setup(r, y);
-        let Some(v) = self.current().cloned() else {
-            let msg = "Connect a disk with a Linux filesystem, or add a disk image to get started.";
-            self.canvas.paragraph(Rect::new(r.x, y, r.w, self.canvas.px(60.0)), msg, Font::Body, t.muted);
-            return;
-        };
+        let Some(v) = self.current().cloned() else { return self.empty_state(r, y) };
         let mounted = self.mount_of(&v).cloned();
         let name = if v.label.is_empty() { v.title.clone() } else { v.label.clone() };
 
@@ -963,7 +1066,7 @@ impl App {
                 add(self, "Mount", Act::Mount, true, 104.0);
             }
             if v.mountable {
-                add(self, "Browse files", Act::Browse, !usable, 120.0);
+                add(self, "Browse files", Act::Browse, false, 120.0);
             }
         }
         y += bh + self.canvas.px(20.0);
@@ -973,13 +1076,14 @@ impl App {
         let notes = mounted.as_ref().map_or_else(|| v.notes.clone(), |m| m.notes.clone());
         let radius = self.canvas.px(8.0);
         for (line, warn) in reasons.iter().map(|l| (l, true)).chain(notes.iter().map(|l| (l, false))).take(3) {
-            let h = self.canvas.px(40.0);
+            let tw = r.w - self.canvas.px(56.0);
+            let h = self.canvas.wrapped_height(line, Font::Body, tw) + self.canvas.px(20.0);
             let card = Rect::new(r.x, y, r.w, h);
             self.canvas.card(card, radius, t.card, if warn { t.warn } else { t.line });
-            let ic = Rect::new(r.x + self.canvas.px(14.0), y, self.canvas.px(20.0), h);
+            let ic = Rect::new(r.x + self.canvas.px(14.0), y, self.canvas.px(20.0), self.canvas.px(40.0));
             self.canvas.text(ic, if warn { I_WARN } else { I_INFO }, Font::Icon, if warn { t.warn } else { t.muted }, false);
-            let tr = Rect::new(r.x + self.canvas.px(42.0), y, r.w - self.canvas.px(56.0), h);
-            self.canvas.text(tr, line, Font::Body, t.text, false);
+            let tr = Rect::new(r.x + self.canvas.px(42.0), y + self.canvas.px(10.0), tw, h);
+            self.canvas.paragraph(tr, line, Font::Body, t.text);
             y += h + self.canvas.px(8.0);
         }
         y += self.canvas.px(4.0);
@@ -1000,30 +1104,47 @@ impl App {
             y += self.canvas.px(28.0);
         }
 
-        // Two cards side by side: how to mount it, and what it is. They stack when narrow.
+        // Two cards side by side: how it is mounted, and what it is. They stack when narrow.
         let gap = self.canvas.px(16.0);
         let stacked = r.w < self.canvas.px(560.0);
         let col = if stacked { r.w } else { (r.w - gap) / 2 };
         let pad = self.canvas.px(16.0);
+        let inner = col - pad * 2;
         let c = self.choices.get(self.selected).cloned().unwrap_or_default();
         let on_auto = self.autos.contains(&v.uuid);
         let can_auto = self.service == Service::Ready && !v.uuid.is_empty();
-        let rows = if mounted.is_some() { 1 } else { 3 };
-        let opt_h = self.canvas.px(44.0) + rows * self.canvas.px(52.0) + pad / 2;
-        let chips_h = self.chip_rows(&v.features, col - pad * 2) * self.canvas.px(30.0);
-        let about_h = self.canvas.px(44.0) + self.canvas.px(26.0) * 2 + chips_h + pad;
-        let h = if stacked { opt_h } else { opt_h.max(about_h) };
+        let head = self.canvas.px(44.0);
+        let row = self.canvas.px(26.0);
+        let option = self.canvas.px(52.0);
+
+        // Raw feature flags matter to few people, so they are quiet text, not decoration.
+        let features = v.features.join(", ");
+        let value_w = inner - self.canvas.px(68.0);
+        let features_h = self.canvas.wrapped_height(&features, Font::Small, value_w);
+        let fact_rows = 2 + !features.is_empty() as i32;
+        let about_h = head + (fact_rows - 1) * row + features_h.max(row) + pad;
+        let left_h = if mounted.is_some() { head + 3 * row + option + pad / 2 } else { head + 3 * option + pad / 2 };
+        let left_h = if v.mountable { left_h } else { 0 };
+        let h = if stacked { left_h } else { left_h.max(about_h) };
 
         let left = Rect::new(r.x, y, col, h);
         if v.mountable {
             self.canvas.card(left, radius, t.card, t.line);
-            let tr = Rect::new(left.x + pad, y + self.canvas.px(12.0), col - pad * 2, self.canvas.px(22.0));
-            self.canvas.text(tr, "Mount options", Font::Strong, t.text, false);
-            let mut oy = y + self.canvas.px(44.0);
-            let ow = col - pad * 2;
-            if mounted.is_none() {
+            let title = if mounted.is_some() { "This mount" } else { "Mount options" };
+            let tr = Rect::new(left.x + pad, y + self.canvas.px(12.0), inner, self.canvas.px(22.0));
+            self.canvas.text(tr, title, Font::Strong, t.text, false);
+            let mut oy = y + head;
+            if let Some(m) = &mounted {
+                let mode = if m.read_only { "Read-only" } else { "Read and write" };
+                self.fact(left.x + pad, oy, inner, "Access", mode);
+                oy += row;
+                self.fact(left.x + pad, oy, inner, "Read", &human(m.read_bytes));
+                oy += row;
+                self.fact(left.x + pad, oy, inner, "Written", &human(m.written_bytes));
+                oy += row + self.canvas.px(6.0);
+            } else {
                 let letter = c.letter.map_or_else(|| "Next free letter".to_string(), |l| format!("{l}:"));
-                let lr = Rect::new(left.x + pad, oy, ow, self.canvas.px(36.0));
+                let lr = Rect::new(left.x + pad, oy, inner, self.canvas.px(36.0));
                 let hot = self.hover == Some(Act::PickLetter);
                 self.canvas.card(lr, self.canvas.px(6.0), if hot { t.hover } else { t.bg }, t.line);
                 let tr = Rect::new(lr.x + self.canvas.px(12.0), lr.y, lr.w - self.canvas.px(40.0), lr.h);
@@ -1031,7 +1152,7 @@ impl App {
                 let cr = Rect::new(lr.right() - self.canvas.px(30.0), lr.y, self.canvas.px(20.0), lr.h);
                 self.canvas.text(cr, I_CHEVRON, Font::Icon, t.muted, true);
                 self.region(lr, Act::PickLetter);
-                oy += self.canvas.px(52.0);
+                oy += option;
                 let hint = if !v.ro_reasons.is_empty() {
                     "Not available for this volume"
                 } else if c.write {
@@ -1039,63 +1160,62 @@ impl App {
                 } else {
                     "Read-only protects the volume"
                 };
-                let sr = Rect::new(left.x + pad, oy, ow, self.canvas.px(42.0));
+                let sr = Rect::new(left.x + pad, oy, inner, self.canvas.px(42.0));
                 self.switch(sr, "Allow writing", hint, c.write, v.ro_reasons.is_empty(), Act::ToggleWrite);
-                oy += self.canvas.px(52.0);
+                oy += option;
             }
-            let sr = Rect::new(left.x + pad, oy, ow, self.canvas.px(42.0));
+            let sr = Rect::new(left.x + pad, oy, inner, self.canvas.px(42.0));
             self.switch(sr, "Mount automatically", "Whenever this volume is present", on_auto, can_auto, Act::ToggleAuto);
         }
 
         let about = if stacked {
             Rect::new(r.x, y + h + gap, col, about_h)
         } else {
-            Rect::new(r.x + col + gap, y, col, h)
+            Rect::new(r.x + col + gap, y, col, h.max(about_h))
         };
-        if about.bottom() > r.bottom() + pad {
-            return;
-        }
         self.canvas.card(about, radius, t.card, t.line);
-        let tr = Rect::new(about.x + pad, about.y + self.canvas.px(12.0), col - pad * 2, self.canvas.px(22.0));
+        let tr = Rect::new(about.x + pad, about.y + self.canvas.px(12.0), inner, self.canvas.px(22.0));
         self.canvas.text(tr, "About this volume", Font::Strong, t.text, false);
-        let mut ay = about.y + self.canvas.px(44.0);
-        let lw = self.canvas.px(64.0);
-        let mut fact = |me: &mut App, k: &str, val: &str| {
-            let (kx, vw) = (about.x + pad, col - pad * 2 - lw);
-            let row = ay;
-            me.canvas.text(Rect::new(kx, row, lw, me.canvas.px(22.0)), k, Font::Small, t.muted, false);
-            me.canvas.text(Rect::new(kx + lw, row, vw, me.canvas.px(22.0)), val, Font::Small, t.text, false);
-            ay += me.canvas.px(26.0);
-        };
-        fact(self, "Type", &v.kind);
+        let mut ay = about.y + head;
+        self.fact(about.x + pad, ay, inner, "Type", &v.kind);
+        ay += row;
         let uuid = if v.uuid.is_empty() { "Unknown" } else { &v.uuid };
-        fact(self, "UUID", uuid);
-        if let Some(m) = &mounted {
-            let s = format!("{} read, {} written", human(m.read_bytes), human(m.written_bytes));
-            fact(self, "Activity", &s);
+        self.fact(about.x + pad, ay, inner, "UUID", uuid);
+        ay += row;
+        if !features.is_empty() {
+            let lw = self.canvas.px(68.0);
+            let lr = Rect::new(about.x + pad, ay, lw, self.canvas.px(22.0));
+            self.canvas.text(lr, "Features", Font::Small, t.muted, false);
+            let fr = Rect::new(about.x + pad + lw, ay + self.canvas.px(3.0), value_w, features_h);
+            self.canvas.paragraph(fr, &features, Font::Small, t.muted);
         }
-        ay += self.canvas.px(4.0);
-        self.chips(about.x + pad, ay, col - pad * 2, &v.features, false);
+        let mut end = about.bottom();
 
         // Snapshots get their own card: this is the way back out of creating them.
-        let Some(subvols) = mounted.as_ref().map(|m| &m.subvolumes).filter(|s| !s.is_empty()) else { return };
-        let names: Vec<String> = subvols.iter().map(|s| s.0.clone()).collect();
-        let sy = about.bottom() + gap;
-        let rows = self.chip_rows(&names, r.w - pad * 2);
-        let card = Rect::new(r.x, sy, r.w, self.canvas.px(70.0) + rows * self.canvas.px(30.0));
-        self.canvas.card(card, radius, t.card, t.line);
-        let tr = Rect::new(card.x + pad, sy + self.canvas.px(12.0), r.w - pad * 2, self.canvas.px(22.0));
-        self.canvas.text(tr, "Snapshots and subvolumes", Font::Strong, t.text, false);
-        let hr = Rect::new(tr.x, tr.bottom(), tr.w, self.canvas.px(18.0));
-        self.canvas.text(hr, "Click one to delete it", Font::Small, t.muted, false);
-        self.chips(card.x + pad, hr.bottom() + self.canvas.px(6.0), r.w - pad * 2, &names, true);
+        let subvols = mounted.as_ref().map(|m| &m.subvolumes).filter(|s| !s.is_empty());
+        if let Some(subvols) = subvols {
+            let names: Vec<String> = subvols.iter().map(|s| s.0.clone()).collect();
+            let sy = end + gap;
+            let rows = self.chip_rows(&names, r.w - pad * 2);
+            let card = Rect::new(r.x, sy, r.w, head + rows * self.canvas.px(30.0) + pad / 2);
+            self.canvas.card(card, radius, t.card, t.line);
+            let tr = Rect::new(card.x + pad, sy + self.canvas.px(12.0), r.w - pad * 2, self.canvas.px(22.0));
+            self.canvas.text(tr, "Snapshots and subvolumes", Font::Strong, t.text, false);
+            self.chips(card.x + pad, sy + head, r.w - pad * 2, &names);
+            end = card.bottom();
+        }
+        end
+    }
+
+    fn chip_width(&self, s: &str) -> i32 {
+        self.canvas.measure(s, Font::Small).0 + self.canvas.px(38.0)
     }
 
     /// How many rows `chips` needs at this width.
     fn chip_rows(&self, items: &[String], width: i32) -> i32 {
         let (mut x, mut rows) = (0, 1);
         for s in items {
-            let w = self.canvas.measure(s, Font::Small).0 + self.canvas.px(20.0);
+            let w = self.chip_width(s);
             if x + w > width && x > 0 {
                 rows += 1;
                 x = 0;
@@ -1105,25 +1225,26 @@ impl App {
         rows
     }
 
-    /// Tags that wrap within `width`; `deletable` ones are buttons.
-    fn chips(&mut self, x0: i32, y0: i32, width: i32, items: &[String], deletable: bool) {
+    /// Subvolumes as tags that wrap within `width`, each with its delete mark.
+    fn chips(&mut self, x0: i32, y0: i32, width: i32, items: &[String]) {
         let t = self.theme();
         let (h, gap) = (self.canvas.px(24.0), self.canvas.px(6.0));
         let (mut x, mut y) = (x0, y0);
         for s in items {
-            let w = self.canvas.measure(s, Font::Small).0 + self.canvas.px(20.0);
+            let w = self.chip_width(s);
             if x + w > x0 + width && x > x0 {
                 x = x0;
                 y += h + gap;
             }
             let c = Rect::new(x, y, w, h);
             let act = Act::DeleteSubvolume(s.clone());
-            let hot = deletable && self.hover.as_ref() == Some(&act);
+            let hot = self.hover.as_ref() == Some(&act);
             self.canvas.round(c, h / 2, if hot { t.hover } else { t.track });
-            self.canvas.text(c, s, Font::Small, t.text, true);
-            if deletable {
-                self.region(c, act);
-            }
+            let label = Rect::new(c.x + self.canvas.px(12.0), c.y, w - self.canvas.px(30.0), h);
+            self.canvas.text(label, s, Font::Small, t.text, false);
+            let mark = Rect::new(c.right() - self.canvas.px(24.0), c.y, self.canvas.px(18.0), h);
+            self.canvas.text(mark, I_CLOSE, Font::IconSmall, t.muted, true);
+            self.region(c, act);
             x += w + gap;
         }
     }
@@ -1135,39 +1256,46 @@ impl App {
         let mut y = self.canvas.px(20.0);
         y = self.paint_banner(r, y);
         let bh = self.canvas.px(34.0);
-        self.button(Rect::new(r.x, y, self.canvas.px(40.0), bh), "", Act::CloseBrowser, false);
-        self.canvas.text(Rect::new(r.x, y, self.canvas.px(40.0), bh), I_CLOSE, Font::Icon, t.text, true);
-        let up = Rect::new(r.x + self.canvas.px(48.0), y, self.canvas.px(40.0), bh);
-        self.button(up, "", Act::BrowseUp, false);
-        self.canvas.text(up, I_BACK, Font::Icon, t.text, true);
         let Some(b) = &self.browser else { return };
+        let at_root = b.path.is_empty();
         let crumb = format!("/{}", b.path.join("/"));
         let label = if b.selected.is_some() { "Export selection" } else { "Export folder" };
-        let ew = self.canvas.px(136.0);
+
+        let up = Rect::new(r.x, y, self.canvas.px(40.0), bh);
+        self.glyph_button(up, I_BACK, Act::BrowseUp, !at_root);
+        let (ew, cw) = (self.canvas.px(136.0), self.canvas.px(76.0));
         let er = Rect::new(r.right() - ew, y, ew, bh);
-        let tr = Rect::new(up.right() + self.canvas.px(14.0), y, er.x - up.right() - self.canvas.px(24.0), bh);
+        let cr = Rect::new(er.x - cw - self.canvas.px(8.0), y, cw, bh);
+        let tr = Rect::new(up.right() + self.canvas.px(14.0), y, cr.x - up.right() - self.canvas.px(24.0), bh);
         self.canvas.text(tr, &crumb, Font::Strong, t.text, false);
+        self.button(cr, "Close", Act::CloseBrowser, false);
         self.button(er, label, Act::Export, true);
         y += bh + self.canvas.px(14.0);
 
         let row_h = self.canvas.px(32.0);
         let hdr = self.canvas.px(24.0);
+        let inset = self.canvas.px(12.0);
         let size_w = self.canvas.px(100.0);
+        let size_r = Rect::new(r.right() - size_w - inset, y, size_w, hdr);
         self.canvas.text(Rect::new(r.x + self.canvas.px(36.0), y, r.w / 2, hdr), "Name", Font::Small, t.muted, false);
-        self.canvas.text(Rect::new(r.right() - size_w, y, size_w, hdr), "Size", Font::Small, t.muted, false);
+        self.canvas.text_right(size_r, "Size", Font::Small, t.muted);
         y += hdr;
         self.canvas.fill(Rect::new(r.x, y, r.w, self.canvas.px(1.0).max(1)), t.line);
         y += self.canvas.px(4.0);
+        let list_top = y;
         let Some(b) = &self.browser else { return };
         let (scroll, sel) = (b.scroll, b.selected);
         let rows: Vec<(String, FileKind, u64)> = b.rows.iter().map(|x| (x.name.clone(), x.kind, x.size)).collect();
-        let visible = ((r.bottom() - y) / row_h).max(0) as usize + 1;
+        if rows.is_empty() {
+            let tr = Rect::new(r.x, y + self.canvas.px(8.0), r.w, self.canvas.px(24.0));
+            self.canvas.text(tr, "This folder is empty", Font::Body, t.muted, true);
+            return;
+        }
+        let bottom = r.bottom() - self.canvas.px(12.0);
+        let fits = ((bottom - y) / row_h).max(1) as usize;
         let first = scroll.max(0) as usize;
-        for (i, (name, kind, size)) in rows.iter().enumerate().skip(first).take(visible) {
+        for (i, (name, kind, size)) in rows.iter().enumerate().skip(first).take(fits) {
             let row = Rect::new(r.x - self.canvas.px(6.0), y, r.w + self.canvas.px(12.0), row_h);
-            if row.bottom() > r.bottom() {
-                break;
-            }
             let radius = self.canvas.px(4.0);
             if sel == Some(i) {
                 self.canvas.round(row, radius, t.selected);
@@ -1180,27 +1308,37 @@ impl App {
                 _ => I_FILE,
             };
             self.canvas.text(Rect::new(r.x + self.canvas.px(4.0), y, self.canvas.px(24.0), row_h), icon, Font::Icon, t.muted, false);
-            let nw = r.w - size_w - self.canvas.px(44.0);
+            let nw = r.w - size_w - self.canvas.px(56.0);
             self.canvas.text(Rect::new(r.x + self.canvas.px(36.0), y, nw, row_h), name, Font::Body, t.text, false);
             if *kind != FileKind::Dir {
-                let s = human(*size);
-                self.canvas.text(Rect::new(r.right() - size_w, y, size_w, row_h), &s, Font::Small, t.muted, false);
+                let sr = Rect::new(size_r.x, y, size_w, row_h);
+                self.canvas.text_right(sr, &human(*size), Font::Small, t.muted);
             }
             self.region(row, Act::BrowseRow(i));
             y += row_h;
         }
+        let x = area.right() - self.canvas.px(6.0);
+        self.scrollbar(x, list_top, bottom - list_top, first as i32, fits as i32, rows.len() as i32);
     }
 
     fn hit(&self, x: i32, y: i32) -> Option<&Region> {
         self.regions.iter().rev().find(|r| r.rect.contains(x, y))
     }
 
-    fn wheel(&mut self, delta: i32) {
-        if let Some(b) = &mut self.browser {
+    /// Scrolls whichever pane the pointer is over.
+    fn wheel(&mut self, x: i32, delta: i32) {
+        let notches = delta.signum();
+        if x < self.canvas.px(280.0).min(self.canvas.w / 2) {
+            let next = self.side_scroll as i32 - notches;
+            self.side_scroll = next.clamp(0, self.side_max as i32) as usize;
+        } else if let Some(b) = &mut self.browser {
             let max = b.rows.len().saturating_sub(5) as i32;
-            b.scroll = (b.scroll - delta.signum() * 3).clamp(0, max);
-            self.invalidate();
+            b.scroll = (b.scroll - notches * 3).clamp(0, max);
+        } else {
+            let step = self.canvas.px(48.0);
+            self.detail_scroll = (self.detail_scroll - notches * step).clamp(0, self.detail_max);
         }
+        self.invalidate();
     }
 
     fn key(&mut self, vk: u16) {
@@ -1237,15 +1375,16 @@ fn list_into(b: &mut Browser) {
     b.selected = None;
     b.scroll = 0;
     b.rows.clear();
+    let Some(fs) = b.fs.clone() else { return };
     let path = format!("/{}", b.path.join("/"));
-    let Ok(dir) = resolve(b.fs.as_ref(), &path) else { return };
+    let Ok(dir) = resolve(fs.as_ref(), &path) else { return };
     let mut ents: Vec<DirEntry> = vec![];
-    let _ = b.fs.read_dir(dir, 0, &mut |_, e| {
+    let _ = fs.read_dir(dir, 0, &mut |_, e| {
         ents.push(e);
         true
     });
     for e in ents {
-        let (kind, size) = b.fs.stat(e.ino).map_or((e.kind, 0), |s| (s.kind, s.size));
+        let (kind, size) = fs.stat(e.ino).map_or((e.kind, 0), |s| (s.kind, s.size));
         b.rows.push(Row { name: String::from_utf8_lossy(&e.name).into_owned(), kind, size });
     }
     b.rows.sort_by(|x, y| (x.kind != FileKind::Dir, &x.name).cmp(&(y.kind != FileKind::Dir, &y.name)));
@@ -1356,7 +1495,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             0
         }
         WM_MOUSEWHEEL => {
-            a.wheel(((wp >> 16) & 0xFFFF) as i16 as i32);
+            let mut p = POINT { x: lo, y: hi };
+            // SAFETY: `p` is valid; wheel messages carry screen coordinates.
+            unsafe { ScreenToClient(hwnd, &mut p) };
+            a.wheel(p.x, ((wp >> 16) & 0xFFFF) as i16 as i32);
             0
         }
         WM_KEYDOWN => {
@@ -1392,7 +1534,7 @@ pub fn run() {
     if !crate::install::elevated() && crate::install::relaunch_elevated("") {
         return;
     }
-    let class = wide("CausewayWindow");
+    let class = wide("NixMountWindow");
     // SAFETY: standard window setup; strings outlive the calls that read them.
     unsafe {
         let inst = GetModuleHandleW(null());
@@ -1411,7 +1553,7 @@ pub fn run() {
             hIconSm: LoadIconW(inst, 1 as *const u16),
         };
         RegisterClassExW(&wc);
-        let title = wide("Causeway");
+        let title = wide("NixMount");
         let hwnd = CreateWindowExW(
             0,
             class.as_ptr(),
@@ -1427,7 +1569,7 @@ pub fn run() {
             null(),
         );
         let scale = GetDpiForWindow(hwnd) as f32 / 96.0;
-        let (w, h) = ((1040.0 * scale) as i32, (700.0 * scale) as i32);
+        let (w, h) = ((1000.0 * scale) as i32, (640.0 * scale) as i32);
         SetWindowPos(hwnd, null_mut(), 0, 0, w, h, SWP_NOMOVE | SWP_NOZORDER);
         let mut rc = std::mem::zeroed();
         GetClientRect(hwnd, &mut rc);
@@ -1450,6 +1592,10 @@ pub fn run() {
             browser: None,
             scrub: None,
             scanned: false,
+            side_scroll: 0,
+            side_max: 0,
+            detail_scroll: 0,
+            detail_max: 0,
         }));
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, app as isize);
         (*app).apply_title_bar();
@@ -1466,16 +1612,16 @@ pub fn run() {
 }
 
 /// Renders the interface with sample data to a BMP, to check the design headlessly.
-pub fn screenshot(path: &std::path::Path, dark: bool, scene: &str) {
+pub fn screenshot(path: &std::path::Path, dark: bool, scene: &str, width: i32, height: i32, scale: f32) {
     let sample = |label: &str, kind: &str, size: u64, used: u64, removable: bool, feats: &[&str]| Volume {
         target: Target::Partition { disk: 1, part: label.len() as u32 },
-        title: "Partition 2".into(),
-        location: "SanDisk Extreme Pro · Disk 1".into(),
+        title: "Disk 1 · Partition 2".into(),
+        location: "SanDisk Extreme Pro".into(),
         size,
         kind: kind.into(),
         mountable: true,
         label: label.into(),
-        uuid: format!("uuid-{label}"),
+        uuid: "6a823ff5-4a92-4fce-b538-02dc1d57d87b".into(),
         removable,
         used: Some(used),
         features: feats.iter().map(|f| f.to_string()).collect(),
@@ -1483,44 +1629,77 @@ pub fn screenshot(path: &std::path::Path, dark: bool, scene: &str) {
         notes: vec![],
         error: None,
     };
-    let mut quota = sample("backups", "ext4", 2_000_000_000_000, 1_900_000_000_000, false, &["has_journal", "quota"]);
-    quota.ro_reasons = vec!["quota: writing would leave quota accounting stale".into()];
-    let volumes = vec![
-        sample("home", "ext4", 512_000_000_000, 214_000_000_000, false, &["has_journal", "extent", "64bit", "metadata_csum", "flex_bg", "dir_index"]),
-        sample("fedora-root", "btrfs", 256_000_000_000, 88_000_000_000, true, &["free_space_tree", "no_holes", "skinny_metadata", "raid1"]),
+    const GB: u64 = 1 << 30;
+    let ext4 = [
+        "has_journal", "ext_attr", "resize_inode", "dir_index", "orphan_file", "filetype", "extent", "64bit", "flex_bg",
+        "metadata_csum_seed", "sparse_super", "large_file", "huge_file", "dir_nlink", "extra_isize", "metadata_csum",
+    ];
+    let mut quota = sample("backups", "ext4", 1863 * GB, 1770 * GB, false, &["has_journal", "extent", "quota"]);
+    quota.ro_reasons = vec!["This volume uses quotas, and writing would leave them out of date".into()];
+    let mut volumes = vec![
+        sample("home", "ext4", 476 * GB, 199 * GB, false, &ext4),
+        sample("fedora-root", "btrfs", 238 * GB, 82 * GB, true, &["free_space_tree", "no_holes", "skinny_metadata", "raid1"]),
         quota,
     ];
+    if scene == "many" {
+        for i in 0..14 {
+            volumes.push(sample(&format!("volume-{i}"), "ext4", (i + 1) * 40 * GB, 8 * GB, false, &ext4));
+        }
+    }
+    if scene == "empty" {
+        volumes.clear();
+    }
     let hwnd = null_mut();
-    let target = volumes[if scene == "mounted" { 1 } else { 0 }].target.clone();
     let mounts = if scene == "mounted" {
         vec![MountStatus {
-            target,
+            target: volumes[1].target.clone(),
             mount_point: "L:".into(),
             read_only: false,
             ro_reasons: vec![],
-            notes: vec!["journal recovered: 212 blocks replayed".into()],
-            total_bytes: 256_000_000_000,
-            free_bytes: 168_000_000_000,
+            notes: vec!["Journal recovered: 212 blocks replayed".into()],
+            total_bytes: 238 * GB,
+            free_bytes: 156 * GB,
             reads: 4120,
             writes: 311,
-            read_bytes: 1_340_000_000,
-            written_bytes: 72_000_000,
+            read_bytes: 1340 << 20,
+            written_bytes: 72 << 20,
             subvolumes: vec![("@home".into(), false), ("snapshot-1731000000".into(), true)],
         }]
     } else {
         vec![]
     };
+    let browser = (scene == "browser").then(|| {
+        let row = |name: &str, kind, size| Row { name: name.into(), kind, size };
+        Browser {
+            fs: None,
+            target: volumes[0].target.clone(),
+            path: vec!["home".into(), "maya".into()],
+            rows: vec![
+                row("Documents", FileKind::Dir, 0),
+                row("Music", FileKind::Dir, 0),
+                row("Pictures", FileKind::Dir, 0),
+                row("projects", FileKind::Dir, 0),
+                row("backup-2026.tar.zst", FileKind::File, 8_400_000_000),
+                row("current-notes", FileKind::Symlink, 24),
+                row("notes.md", FileKind::File, 18_300),
+                row("thesis-final-v3.pdf", FileKind::File, 4_180_000),
+                row("vacation.mp4", FileKind::File, 2_210_000_000),
+            ],
+            scroll: 0,
+            selected: Some(7),
+        }
+    });
     let n = volumes.len();
     let mut a = App {
         hwnd,
-        canvas: Canvas::new(1040, 700, 1.0),
+        canvas: Canvas::new((width as f32 * scale) as i32, (height as f32 * scale) as i32, scale),
         dark,
         volumes,
         mounts,
         autos: vec![],
         choices: vec![Choice::default(); n],
         winfsp: scene != "setup",
-        service: Service::Ready,
+        service: if scene == "setup" { Service::Missing } else { Service::Ready },
         selected: match scene {
             "mounted" => 1,
             "readonly" => 2,
@@ -1529,11 +1708,15 @@ pub fn screenshot(path: &std::path::Path, dark: bool, scene: &str) {
         regions: vec![],
         hover: None,
         focus: None,
-        busy: None,
+        busy: (scene == "busy").then(|| "Mounting…".to_string()),
         banner: None,
-        browser: None,
+        browser,
         scrub: None,
         scanned: true,
+        side_scroll: 0,
+        side_max: 0,
+        detail_scroll: 0,
+        detail_max: 0,
     };
     a.paint();
     let _ = a.canvas.save_bmp(path);

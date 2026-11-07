@@ -9,29 +9,29 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 const USAGE: &str = "\
-Causeway: mount ext2/3/4 and Btrfs volumes on Windows.
+NixMount: mount ext2/3/4 and Btrfs volumes on Windows.
 
 Usage:
-  causeway                        Open the interface
-  causeway list                   List Linux volumes
-  causeway info <target>          Show a volume's details and write eligibility
-  causeway mount <target> [X:]    Mount through the service
+  nixmount                        Open the interface
+  nixmount list                   List Linux volumes
+  nixmount info <target>          Show a volume's details and write eligibility
+  nixmount mount <target> [X:]    Mount through the service
       --rw                        Allow writing (the default is read-only)
       --foreground                Mount in this process until Ctrl+C
       --codepage <n>              Decode names with Windows code page n
       --show-dotfiles             Don't mark dotfiles hidden
       --uid <n> --gid <n>         Owner of new files
-  causeway unmount <X:>           Commit and detach
-  causeway automount on|off <target> [X:] [--rw]   Mount whenever the volume is present
-  causeway sync                   Commit all mounted volumes now
-  causeway ls <target> [path]     List a directory without mounting
-  causeway export <target> <path> <dest>   Copy files out without mounting
-  causeway scrub <X:>             Verify checksums on a mounted volume
-  causeway snapshot <X:> <name> [--read-only]    Snapshot a mounted Btrfs volume
-  causeway subvolume list|create|delete <X:> [name]    Manage Btrfs subvolumes and snapshots
-  causeway install                Set up everything, including the driver
-  causeway uninstall              Remove everything setup added
-  causeway service run|debug      Run the service (debug: in this console)
+  nixmount unmount <X:>           Commit and detach
+  nixmount automount on|off <target> [X:] [--rw]   Mount whenever the volume is present
+  nixmount sync                   Commit all mounted volumes now
+  nixmount ls <target> [path]     List a directory without mounting
+  nixmount export <target> <path> <dest>   Copy files out without mounting
+  nixmount scrub <X:>             Verify checksums on a mounted volume
+  nixmount snapshot <X:> <name> [--read-only]    Snapshot a mounted Btrfs volume
+  nixmount subvolume list|create|delete <X:> [name]    Manage Btrfs subvolumes and snapshots
+  nixmount install                Set up everything, including the driver
+  nixmount uninstall              Remove everything setup added
+  nixmount service run|debug      Run the service (debug: in this console)
 
 A target is an image file (optionally file#partition) or disk:partition, e.g. 1:3.
 
@@ -58,7 +58,7 @@ fn call(r: &Request) -> Result<Response, String> {
     match ipc::call(r) {
         Ok(Response::Error(e)) => Err(e),
         Ok(r) => Ok(r),
-        Err(_) => Err("the Causeway service isn't running: run `causeway install`".into()),
+        Err(_) => Err("the NixMount service isn't running: run `nixmount install`".into()),
     }
 }
 
@@ -238,11 +238,11 @@ pub fn run(mut args: Vec<String>) -> Result<(), String> {
         }
         "install" => {
             crate::install::install()?;
-            println!("Causeway is installed.");
+            println!("NixMount is installed.");
         }
         "uninstall" => {
             crate::install::uninstall()?;
-            println!("Causeway is removed.");
+            println!("NixMount is removed.");
         }
         "list" => {
             let vols = match ipc::call(&Request::Scan) {

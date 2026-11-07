@@ -131,8 +131,8 @@ pub fn scan_disks() -> Vec<Volume> {
         }
         let mut v = Volume {
             target,
-            title: format!("Partition {}", p.part),
-            location: format!("{} · Disk {}", p.disk_name, p.disk),
+            title: format!("Disk {} · Partition {}", p.disk, p.part),
+            location: p.disk_name.clone(),
             size: p.size,
             kind: p.kind.name(),
             mountable: p.kind.mountable(),
@@ -192,7 +192,7 @@ pub fn describe_image(path: &Path) -> Volume {
 /// A list entry for a volume that is open, built from the engine's own view of it.
 pub fn describe_mounted(target: &Target, info: &VolumeInfo) -> Volume {
     let (title, location) = match target {
-        Target::Partition { disk, part } => (format!("Partition {part}"), format!("Disk {disk}")),
+        Target::Partition { disk, part } => (format!("Disk {disk} · Partition {part}"), "Mounted partition".to_string()),
         Target::Group { members } => (format!("{} devices", members.len()), "Multi-device".to_string()),
         Target::Image { path, .. } => (
             path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned()),

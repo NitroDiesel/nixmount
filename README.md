@@ -1,15 +1,15 @@
-# Causeway
+# NixMount
 
 Mount ext2, ext3, ext4 and Btrfs volumes on Windows, with drive letters, in one small program.
 
-![Causeway showing a mounted Btrfs volume](docs/images/mounted-dark.png)
+![NixMount showing a mounted Btrfs volume](docs/images/mounted-dark.png)
 
-Causeway is a Rust reimplementation of two long-running projects, [Ext4Fsd] and [WinBtrfs],
-combined into a single application. Both are kernel drivers written in C. Causeway does the
+NixMount is a Rust reimplementation of two long-running projects, [Ext4Fsd] and [WinBtrfs],
+combined into a single application. Both are kernel drivers written in C. NixMount does the
 same job in memory-safe user-mode code, so a bug or a corrupted disk can fail one request but
 can't crash Windows.
 
-| | Ext4Fsd + WinBtrfs | Causeway |
+| | Ext4Fsd + WinBtrfs | NixMount |
 |---|---|---|
 | Install | Separate installers per project | One 4 MB file, nothing else to download |
 | Runs as | Two kernel drivers | One program, using the Microsoft-signed [WinFsp] driver it carries |
@@ -22,7 +22,7 @@ can't crash Windows.
 
 ## Getting started
 
-1. Download `Causeway-Setup.exe` from [Releases](../../releases) and run it.
+1. Download `NixMount-Setup.exe` from [Releases](../../releases) and run it.
 2. Select **Install**. This is the only setup step: the driver is included.
 3. Pick a volume and select **Mount**.
 
@@ -45,6 +45,10 @@ disk first.
 - [Compatibility](docs/compatibility.md): which filesystem features work, and what changed from the originals
 - [Design](docs/design.md): how it works and how it is verified
 - [Security](docs/security.md): the threat model and what the design does about it
+
+## Contributors
+
+Built by NitroDiesel and Claude. See [CONTRIBUTORS](CONTRIBUTORS.md).
 
 ## License
 

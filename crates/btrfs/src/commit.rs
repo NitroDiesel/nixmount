@@ -204,7 +204,7 @@ impl Fs {
     /// published, so the volume stays exactly as of the last commit.
     pub fn abort(&mut self, why: &FsError) {
         self.read_only = true;
-        self.ro_reasons.push(format!("switched to read-only after an error: {why}"));
+        self.ro_reasons.push(format!("Switched to read-only after an error: {why}"));
         self.txn = Txn::default();
         self.cache.clear();
         let sb = &self.sb;

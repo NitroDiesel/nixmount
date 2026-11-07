@@ -6,10 +6,10 @@ The main threat is a **hostile disk**: a USB drive or image crafted to attack wh
 Filesystem parsers are a classic target, because the data is complex, attacker-controlled, and
 traditionally parsed in the kernel.
 
-The second threat is **an unprivileged local user** trying to use Causeway's privileged service
+The second threat is **an unprivileged local user** trying to use NixMount's privileged service
 to gain access they shouldn't have.
 
-Causeway doesn't defend against an administrator, or against someone with physical access to a
+NixMount doesn't defend against an administrator, or against someone with physical access to a
 disk: volumes aren't encrypted, and Linux permissions aren't enforced on Windows.
 
 ## Hostile disks
@@ -38,7 +38,7 @@ The service runs as SYSTEM, so its boundaries matter:
 - Messages are size-limited and decoded with a schema, not parsed by hand.
 - It runs from `Program Files`, not from wherever it was downloaded, and its path is quoted. A
   service binary in a user-writable folder would be a privilege-escalation hole.
-- `%ProgramData%\Causeway` decides what the service mounts, so installing resets it to SYSTEM and
+- `%ProgramData%\NixMount` decides what the service mounts, so installing resets it to SYSTEM and
   Administrators only. Any user can create folders there, so it may already exist with a hostile
   owner or ACL, and the install stops if those can't be replaced.
 - WinFsp's DLL is loaded by absolute path from the registry, which keeps DLL search-order attacks
@@ -65,7 +65,7 @@ makes installers a classic target:
 
 ## Compared with the originals
 
-| Problem in the original | Causeway |
+| Problem in the original | NixMount |
 |---|---|
 | `Ext2Srv` asked for a pipe DACL granting full control to Guests and Anonymous | Pipe limited to SYSTEM and Administrators |
 | Parsing untrusted disks in kernel mode | Safe user-mode code |
@@ -78,7 +78,7 @@ makes installers a classic target:
 - Volume-level permissions: every signed-in user can read a mounted volume. See the
   [guide](guide.md#permissions).
 - WinFsp is part of the trusted base, as a kernel driver maintained by its own project.
-- `Causeway-Setup.exe` isn't code-signed, so Windows can't vouch for it. Check it against the
+- `NixMount-Setup.exe` isn't code-signed, so Windows can't vouch for it. Check it against the
   published SHA-256 hash, or build it from source.
 - Automount trusts a volume's UUID, which a crafted disk can copy. A disk with a remembered UUID
   gets mounted with the remembered options, including writing. It is still parsed with all the

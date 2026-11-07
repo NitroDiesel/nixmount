@@ -1,9 +1,10 @@
 [package]
 name = "fscore"
-description = "Block devices, partition and filesystem detection, and the VFS contract shared by the Causeway engines"
+description = "Block devices, partition and filesystem detection, and the VFS contract shared by the NixMount engines"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+authors.workspace = true
 
 [dependencies]
 crc32c = "0.6"

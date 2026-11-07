@@ -16,7 +16,7 @@ fn have_tools() -> bool {
 }
 
 fn out_dir() -> PathBuf {
-    let d = std::env::var("CAUSEWAY_OUT").map_or_else(|_| std::env::temp_dir().join("causeway-oracle"), PathBuf::from);
+    let d = std::env::var("NIXMOUNT_OUT").map_or_else(|_| std::env::temp_dir().join("nixmount-oracle"), PathBuf::from);
     std::fs::create_dir_all(&d).unwrap();
     d
 }

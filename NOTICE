@@ -1,6 +1,6 @@
-Causeway is released under the GNU General Public License, version 2 only. See LICENSE.
+NixMount is released under the GNU General Public License, version 2 only. See LICENSE.
 
-Causeway provides the functionality of two earlier projects:
+NixMount provides the functionality of two earlier projects:
 
   Ext4Fsd, by Matt Wu, Bo Branten and contributors (GPL-2.0)
   https://github.com/bobranten/Ext4Fsd
@@ -8,10 +8,10 @@ Causeway provides the functionality of two earlier projects:
   WinBtrfs, by Mark Harmstone (LGPL-3.0)
   https://github.com/maharmstone/btrfs
 
-Causeway is new code written against the documented on-disk formats of ext4, jbd2 and
+NixMount is new code written against the documented on-disk formats of ext4, jbd2 and
 Btrfs. No source file from either project was copied or translated. This matters because
 GPL-2.0-only and LGPL-3.0 code cannot be combined in one program. GPL-2.0 was chosen so that
-Causeway stays compatible with Ext4Fsd, the project it most directly replaces.
+NixMount stays compatible with Ext4Fsd, the project it most directly replaces.
 
 WinFsp is used under its FLOSS exception, which permits linking with its DLL and distributing
 its unmodified installer. app/res holds the official, signed installer, unchanged, and the

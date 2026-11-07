@@ -5,7 +5,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  CAUSEWAY_OUT: ${{ github.workspace }}/oracle
+  NIXMOUNT_OUT: ${{ github.workspace }}/oracle
 
 jobs:
   # The engines are platform-independent, so Linux can judge them with real tools.
@@ -20,7 +20,7 @@ jobs:
       - name: Engines vs e2fsck / btrfs check
         run: cargo test --no-fail-fast --profile ci-test -p ext4 -p btrfs -p fscore -- --nocapture --test-threads=4
       - name: Linux kernel reads what the engines wrote
-        run: bash ci/kernel-check.sh "$CAUSEWAY_OUT"
+        run: bash ci/kernel-check.sh "$NIXMOUNT_OUT"
       - name: Kernel-made images (dirty journals, compression, shared snapshots)
         run: |
           cargo test --profile ci-test -p ext4 --test dirty -- --nocapture
@@ -41,11 +41,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --release --locked -p causeway
-      - run: cargo test -p fscore -p ext4 -p btrfs -p causeway
+      - run: cargo build --release --locked -p nixmount
+      - run: cargo test -p fscore -p ext4 -p btrfs -p nixmount
       - name: End to end through the real service and WinFsp
         shell: pwsh
-        run: ci/windows-e2e.ps1 -Exe (Resolve-Path target/release/causeway.exe).Path -Out e2e
+        run: ci/windows-e2e.ps1 -Exe (Resolve-Path target/release/nixmount.exe).Path -Out e2e
       - name: The bundled installer is the official, unmodified release
         shell: pwsh
         run: |
@@ -53,8 +53,8 @@ jobs:
           if ($hash -ne "073A70E00F77423E34BED98B86E600DEF93393BA5822204FAC57A29324DB9F7A") { throw "unexpected MSI: $hash" }
       - uses: actions/upload-artifact@v4
         with:
-          name: causeway-windows-x64
-          path: target/release/causeway.exe
+          name: nixmount-windows-x64
+          path: target/release/nixmount.exe
       - uses: actions/upload-artifact@v4
         if: always()
         with:

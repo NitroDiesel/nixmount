@@ -65,20 +65,20 @@ const RO_WRITABLE: u32 =
 
 /// Reasons a known feature forces read-only, with the wording shown to the user.
 const RO_INCOMPAT: &[(u32, &str)] = &[
-    (IN_INLINE_DATA, "inline_data: small files live inside inodes; writing them isn't supported yet"),
-    (IN_EA_INODE, "ea_inode: large extended attributes aren't writable yet"),
-    (IN_ENCRYPT, "encrypt: fscrypt keys aren't available on Windows"),
-    (IN_CASEFOLD, "casefold: case-insensitive directories aren't writable yet"),
-    (IN_MMP, "mmp: multi-mount protection could not be honoured while writing"),
+    (IN_INLINE_DATA, "Small files are stored inside inodes (inline_data), which can't be written yet"),
+    (IN_EA_INODE, "Large extended attributes (ea_inode) can't be written yet"),
+    (IN_ENCRYPT, "Encrypted with fscrypt, and the keys aren't available on Windows"),
+    (IN_CASEFOLD, "Case-insensitive folders (casefold) can't be written yet"),
+    (IN_MMP, "Multi-mount protection (mmp) can't be honored while writing"),
 ];
 const RO_ROCOMPAT: &[(u32, &str)] = &[
-    (RO_QUOTA, "quota: writing would leave quota accounting stale"),
-    (RO_PROJECT, "project: project quotas would go stale"),
-    (RO_BIGALLOC, "bigalloc: cluster allocation isn't writable yet"),
-    (RO_VERITY, "verity: protected files must stay untouched"),
-    (RO_ORPHAN_PRESENT, "orphan_file has pending entries: mount once in Linux to clear them"),
-    (RO_SHARED_BLOCKS, "shared_blocks: the volume has deduplicated blocks"),
-    (RO_READONLY, "the volume is flagged read-only"),
+    (RO_QUOTA, "Quotas are on, and writing would leave them out of date"),
+    (RO_PROJECT, "Project quotas are on, and writing would leave them out of date"),
+    (RO_BIGALLOC, "Cluster allocation (bigalloc) can't be written yet"),
+    (RO_VERITY, "Holds verity-protected files, which must stay untouched"),
+    (RO_ORPHAN_PRESENT, "Deleted files are waiting to be cleaned up. Mount it once in Linux to clear them"),
+    (RO_SHARED_BLOCKS, "Deduplicated blocks (shared_blocks) can't be written yet"),
+    (RO_READONLY, "The volume is flagged read-only"),
 ];
 
 fn feature_names(compat: u32, incompat: u32, ro: u32) -> Vec<String> {
@@ -237,36 +237,36 @@ impl Ext4 {
             }
         }
         if ro & !(RO_WRITABLE | RO_ROCOMPAT.iter().fold(0, |a, r| a | r.0)) != 0 {
-            reasons.push(format!("unknown read-only features {:#x}", ro & !RO_WRITABLE));
+            reasons.push(format!("Unknown read-only features {:#x}", ro & !RO_WRITABLE));
         }
         if compat & COMPAT_SPARSE_SUPER2 != 0 {
-            reasons.push("sparse_super2 isn't writable yet".into());
+            reasons.push("sparse_super2 volumes can't be written yet".into());
         }
         if !g.extents && g.is_64bit {
-            reasons.push("64bit without extents is not a supported layout".into());
+            reasons.push("64bit without extents isn't a supported layout".into());
         }
         if g.metadata_csum && sb.u32_at(0x3FC) != sb_csum(&sb) {
-            reasons.push("superblock failed its checksum: run e2fsck in Linux".into());
+            reasons.push("The superblock failed its checksum. Run e2fsck in Linux".into());
         }
         let state = sb.u16_at(0x3A);
         if state & 2 != 0 {
-            reasons.push("the filesystem has recorded errors: run e2fsck in Linux first".into());
+            reasons.push("The filesystem has recorded errors. Run e2fsck in Linux first".into());
         }
         if dev.len() < g.blocks * g.bs as u64 {
-            reasons.push("the device is smaller than the filesystem: it may be truncated".into());
+            reasons.push("The device is smaller than the filesystem, so it may be truncated".into());
         }
         let has_journal = compat & COMPAT_HAS_JOURNAL != 0;
         if !has_journal && state & 1 == 0 {
-            reasons.push("not cleanly unmounted and has no journal: run e2fsck in Linux first".into());
+            reasons.push("Not cleanly unmounted, and there's no journal to recover from. Run e2fsck in Linux first".into());
         }
         if has_journal && sb.u32_at(0xE0) == 0 {
-            reasons.push("external journals aren't supported for writing".into());
+            reasons.push("External journals can't be written yet".into());
             if incompat & IN_RECOVER != 0 {
-                notes.push("the external journal has pending changes, so recent files may look out of date".into());
+                notes.push("The external journal has pending changes, so recent files may look out of date".into());
             }
         }
         if opts.write && !dev.writable() {
-            reasons.push("the device was opened read-only".into());
+            reasons.push("The device was opened read-only".into());
         }
 
         let groups = g.groups;
@@ -297,18 +297,18 @@ impl Ext4 {
         if has_journal && fs.sb.u32_at(0xE0) != 0 {
             let mut j = fs.open_journal(fs.sb.u32_at(0xE0))?;
             if j.has_fast_commit() {
-                reasons.push("fast_commit journals aren't writable yet".into());
+                reasons.push("fast_commit journals can't be written yet".into());
             }
             if incompat & IN_RECOVER != 0 && !j.is_clean() {
                 let replay = fs.scan_journal(&j)?;
                 let want_write = want_write && reasons.is_empty();
                 if want_write {
-                    notes.push(format!("journal recovered: {} blocks replayed", replay.len()));
+                    notes.push(format!("Journal recovered: {} blocks replayed", replay.len()));
                     fs.replay_to_disk(&mut j, &replay)?;
                     fs.cache.clear();
                 } else {
                     notes.push(format!(
-                        "volume was not cleanly unmounted: {} journal blocks applied in memory only, nothing was written",
+                        "Not cleanly unmounted: {} journal blocks applied in memory only, nothing was written",
                         replay.len()
                     ));
                     fs.overlay = replay;
@@ -450,7 +450,7 @@ impl Fs {
         if let Err(e) = &r {
             // The disk is in an unknown state: refuse further writes rather than guess.
             self.read_only = true;
-            self.ro_reasons.push(format!("a write failed and the volume was switched to read-only: {e}"));
+            self.ro_reasons.push(format!("A write failed, so the volume switched to read-only: {e}"));
         }
         r
     }

@@ -1,7 +1,7 @@
 # Compatibility
 
 The rule behind these tables: a volume is writable only if every feature it uses is fully
-supported. Otherwise it mounts read-only and says why. Causeway never ignores a feature to get
+supported. Otherwise it mounts read-only and says why. NixMount never ignores a feature to get
 write access.
 
 ## ext2, ext3, ext4
@@ -54,7 +54,7 @@ volume read-write.
 
 Replaced by something better:
 
-| Original | Causeway |
+| Original | NixMount |
 |---|---|
 | Kernel drivers | User-mode engines on WinFsp |
 | 54,000 lines of code page tables | One call into Windows for `--codepage` |

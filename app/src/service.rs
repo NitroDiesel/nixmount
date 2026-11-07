@@ -14,7 +14,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     RegisterDeviceNotificationW, DBT_DEVTYP_DEVICEINTERFACE, DEV_BROADCAST_DEVICEINTERFACE_W,
 };
 
-pub const NAME: &str = "Causeway";
+pub const NAME: &str = "NixMount";
 const SERVICE_WIN32_OWN: u32 = SERVICE_WIN32_OWN_PROCESS;
 const DBT_DEVICEARRIVAL: u32 = 0x8000;
 const DBT_DEVICEREMOVECOMPLETE: u32 = 0x8004;
@@ -212,7 +212,7 @@ fn start_scrub(s: &State, point: String) -> Response {
     Response::Ok
 }
 
-/// Entry point for `causeway service run`, which the service control manager starts.
+/// Entry point for `nixmount service run`, which the service control manager starts.
 pub fn run() -> Result<(), String> {
     let name = wide(NAME);
     let table = [
@@ -304,7 +304,7 @@ pub fn register(exe: &std::path::Path) -> Result<(), String> {
     }
     // Quoted, or a path with spaces becomes a privilege-escalation hole.
     let cmd = wide(&format!("\"{}\" service run", exe.display()));
-    let (name, display) = (wide(NAME), wide("Causeway Volume Service"));
+    let (name, display) = (wide(NAME), wide("NixMount Volume Service"));
     let deps = wide("WinFsp.Launcher\0");
     // SAFETY: all strings are NUL-terminated.
     let h = unsafe {

@@ -2,21 +2,21 @@
 
 ## Install
 
-Run `Causeway-Setup.exe` and approve the administrator prompt, which is needed because only
-administrators can read raw disks. Then select **Install**, or run `causeway install`.
+Run `NixMount-Setup.exe` and approve the administrator prompt, which is needed because only
+administrators can read raw disks. Then select **Install**, or run `nixmount install`.
 
-Everything comes in that one file. Setup copies the program to `C:\Program Files\Causeway`, adds
+Everything comes in that one file. Setup copies the program to `C:\Program Files\NixMount`, adds
 it to the Start menu, installs the WinFsp driver it carries, and starts a small background
 service. Mounts belong to the service, so they stay up after you close the window, are visible
 to every user on the PC, and are closed cleanly at shutdown.
 
-Running a newer `Causeway-Setup.exe` upgrades in place. Mounted volumes are closed cleanly first.
+Running a newer `NixMount-Setup.exe` upgrades in place. Mounted volumes are closed cleanly first.
 
 Without installing, the same file can still **Browse files** and export them.
 
-To remove Causeway, use **Installed apps** in Windows Settings, or run `causeway uninstall`. This
+To remove NixMount, use **Installed apps** in Windows Settings, or run `nixmount uninstall`. This
 removes everything setup added, including the driver. If WinFsp was already on the PC before
-Causeway, it stays, since something else may need it.
+NixMount, it stays, since something else may need it.
 
 ## Mount a volume
 
@@ -46,7 +46,7 @@ Before writing:
   what you wrote. This can't be detected reliably.
 - Keep backups of anything you can't lose.
 
-If a volume uses a feature Causeway can't safely write, **Allow writing** is off and the window
+If a volume uses a feature NixMount can't safely write, **Allow writing** is off and the window
 says why. See [Compatibility](compatibility.md).
 
 Changes reach the disk within five seconds, or at once when a program flushes a file. If a
@@ -93,22 +93,22 @@ Symbolic links work, but always stay inside the volume. An absolute Linux link s
 
 ## Command line
 
-`causeway help` lists every command. A few common ones:
+`nixmount help` lists every command. A few common ones:
 
 ```
-causeway list                        Show Linux volumes
-causeway info 1:3                    Details, and whether writing is available
-causeway mount 1:3 L: --rw           Mount disk 1, partition 3 as L:, writable
-causeway mount backup.img            Mount an image on the next free letter
-causeway unmount L:
-causeway ls 1:3 /home                List a folder without mounting
-causeway export 1:3 /home/me D:\me   Copy out without mounting
-causeway scrub L:                    Verify checksums
-causeway snapshot L: before-upgrade --read-only
-causeway subvolume delete L: before-upgrade
+nixmount list                        Show Linux volumes
+nixmount info 1:3                    Details, and whether writing is available
+nixmount mount 1:3 L: --rw           Mount disk 1, partition 3 as L:, writable
+nixmount mount backup.img            Mount an image on the next free letter
+nixmount unmount L:
+nixmount ls 1:3 /home                List a folder without mounting
+nixmount export 1:3 /home/me D:\me   Copy out without mounting
+nixmount scrub L:                    Verify checksums
+nixmount snapshot L: before-upgrade --read-only
+nixmount subvolume delete L: before-upgrade
 ```
 
-`causeway list` shows the disk and partition numbers. Run from an elevated prompt. Causeway is a
+`nixmount list` shows the disk and partition numbers. Run from an elevated prompt. NixMount is a
 windowed program, so a PowerShell script should end commands with `| Out-Host` to wait for them.
 
 ## Troubleshooting
@@ -128,4 +128,4 @@ errors. The window lists the reason. Most clear after mounting it once in Linux 
 `e2fsck`.
 
 **The service won't start.** Run setup again to repair it, or run
-`causeway service debug` from an elevated prompt to watch it run.
+`nixmount service debug` from an elevated prompt to watch it run.

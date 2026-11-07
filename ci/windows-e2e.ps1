@@ -6,14 +6,15 @@ $ErrorActionPreference = 'Stop'
 New-Item -ItemType Directory -Force $Out | Out-Null
 $Out = (Resolve-Path $Out).Path
 $driver = "${env:ProgramFiles(x86)}\WinFsp\bin\winfsp-x64.dll"
-$program = "$env:ProgramFiles\Causeway"
-$arp = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Causeway'
-$link = "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\Causeway.lnk"
+$program = "$env:ProgramFiles\NixMount"
+$arp = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\NixMount'
+$link = "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\NixMount.lnk"
 
 # The program is a GUI executable: PowerShell only waits for it when its output is piped.
-function Causeway {
-    & $Exe @args | Out-Host
-    if ($LASTEXITCODE) { throw "causeway $args failed with $LASTEXITCODE" }
+function NixMount {
+    $ErrorActionPreference = 'Continue'
+    & $Exe @args 2>&1 | Out-Host
+    if ($LASTEXITCODE) { throw "nixmount $args failed with $LASTEXITCODE" }
 }
 
 function Expand-Fixture($name) {
@@ -40,19 +41,19 @@ function Wait-For($condition) {
 }
 
 Check 'the machine starts without the driver' (-not (Test-Path $driver))
-Causeway install
+NixMount install
 Check 'setup installed the bundled driver' (Test-Path $driver)
-Check 'setup started the service' ((Get-Service Causeway).Status -eq 'Running')
-Check 'setup installed to Program Files' (Test-Path "$program\causeway.exe")
+Check 'setup started the service' ((Get-Service NixMount).Status -eq 'Running')
+Check 'setup installed to Program Files' (Test-Path "$program\nixmount.exe")
 Check 'setup added a Start menu entry' (Test-Path $link)
 Check 'setup is listed in installed apps' (Test-Path $arp)
-Causeway install
-Check 'running setup again keeps the service running' ((Get-Service Causeway).Status -eq 'Running')
+NixMount install
+Check 'running setup again keeps the service running' ((Get-Service NixMount).Status -eq 'Running')
 
 foreach ($item in @(@('ext4-default', 'K'), @('btrfs-default', 'L'))) {
     $name, $d = $item
     $img = Expand-Fixture $name
-    Causeway mount $img "${d}:" --rw
+    NixMount mount $img "${d}:" --rw
     $root = "${d}:\"
 
     Check "$name lists seeded files" ((Get-Content "${root}hello.txt") -eq 'hello from linux')
@@ -82,20 +83,20 @@ foreach ($item in @(@('ext4-default', 'K'), @('btrfs-default', 'L'))) {
     Check "$name reports disk full" $failed
     Remove-Item "${root}fill.bin" -ErrorAction SilentlyContinue
 
-    Causeway scrub "${d}:"
-    Causeway unmount "${d}:"
+    NixMount scrub "${d}:"
+    NixMount unmount "${d}:"
     Check "$name drive letter is gone" (-not (Test-Path $root))
 }
 
 # Read-only mounts must not change a single byte.
 $img = Expand-Fixture 'ext3-1k'
 $before = (Get-FileHash $img).Hash
-Causeway mount $img 'M:'
+NixMount mount $img 'M:'
 Check 'read-only mount serves files' ((Get-Content 'M:\hello.txt') -eq 'hello from linux')
 $blocked = $false
 try { Set-Content 'M:\nope.txt' 'x' -ErrorAction Stop } catch { $blocked = $true }
 Check 'read-only mount refuses writes' $blocked
-Causeway unmount 'M:'
+NixMount unmount 'M:'
 Check 'read-only mount left the image untouched' ($before -eq (Get-FileHash $img).Hash)
 
 # Raw partition access, the real-disk path, on a virtual disk so nothing real is touched.
@@ -127,17 +128,17 @@ Mount-DiskImage -ImagePath $vhd -NoDriveLetter | Out-Null
 try {
     $disk = (Get-DiskImage -ImagePath $vhd).Number
     $part = (Get-Partition -DiskNumber $disk | Select-Object -First 1).PartitionNumber
-    Causeway mount "${disk}:${part}" 'J:' --rw
+    NixMount mount "${disk}:${part}" 'J:' --rw
     Check 'raw partition serves files' ((Get-Content 'J:\hello.txt') -eq 'hello from linux')
     Set-Content 'J:\raw.txt' 'written through the raw device'
     New-Item -ItemType Directory 'J:\rawdir' | Out-Null
     Copy-Item "$env:WINDIR\notepad.exe" 'J:\rawdir\copy.exe'
     Check 'raw partition copy is byte-exact' ((Get-FileHash "$env:WINDIR\notepad.exe").Hash -eq (Get-FileHash 'J:\rawdir\copy.exe').Hash)
     Check 'a locked read-write mount stays listed' ((& $Exe list | Out-String) -match "${disk}:${part}")
-    Causeway unmount 'J:'
+    NixMount unmount 'J:'
 
     # Hotplug: a remembered volume mounts itself on arrival, and unplugging frees the letter.
-    Causeway automount on "${disk}:${part}" 'J:'
+    NixMount automount on "${disk}:${part}" 'J:'
     Dismount-DiskImage -ImagePath $vhd | Out-Null
     Mount-DiskImage -ImagePath $vhd -NoDriveLetter | Out-Null
     Check 'a remembered volume mounts itself when plugged in' (Wait-For { Test-Path 'J:\hello.txt' })
@@ -146,8 +147,8 @@ try {
     Mount-DiskImage -ImagePath $vhd -NoDriveLetter | Out-Null
     [void](Wait-For { Test-Path 'J:\hello.txt' })
     $disk = (Get-DiskImage -ImagePath $vhd).Number
-    Causeway unmount 'J:'
-    Causeway automount off "${disk}:${part}"
+    NixMount unmount 'J:'
+    NixMount automount off "${disk}:${part}"
 } finally {
     Dismount-DiskImage -ImagePath $vhd | Out-Null
 }
@@ -162,8 +163,8 @@ $f.Close()
 Remove-Item $vhd, $create
 
 # Uninstalling reverses all of it, including the driver setup brought.
-Causeway uninstall
-Check 'uninstall removed the service' (-not (Get-Service Causeway -ErrorAction SilentlyContinue))
+NixMount uninstall
+Check 'uninstall removed the service' (-not (Get-Service NixMount -ErrorAction SilentlyContinue))
 Check 'uninstall removed the bundled driver' (-not (Test-Path $driver))
 Check 'uninstall removed the program' (-not (Test-Path $program))
 Check 'uninstall removed the Start menu entry' (-not (Test-Path $link))
