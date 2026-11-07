@@ -133,18 +133,28 @@ impl Fs {
         let Some(e) = parse_dir_items(&d)?.into_iter().find(|e| e.name == name) else {
             return Ok(None);
         };
-        Ok(Some((self.resolve_location(dir, &e)?, e)))
+        match self.resolve_location(dir, &e) {
+            Ok(ino) => Ok(Some((ino, e))),
+            Err(FsError::NotFound) => Ok(None),
+            Err(err) => Err(err),
+        }
     }
 
-    /// Turns a directory entry into the inode it names.
+
+    /// Turns a directory entry into the inode it names. An entry for a subvolume only
+    /// counts if this tree holds a root ref for it: a snapshot inherits the entries of
+    /// subvolumes nested in its source, but those are not part of the snapshot.
     pub fn resolve_location(&self, dir: Ino, e: &DirItem) -> Result<Ino> {
         if e.location.ty == K_ROOT_ITEM {
-            let (_, item) = self.root_item(e.location.obj)?;
-            return Ok(Ino { tree: e.location.obj, id: item.u64_at(168) });
+            let sub = e.location.obj;
+            if self.get(self.root_tree, Key::new(dir.tree, K_ROOT_REF, sub))?.is_none() {
+                return Err(FsError::NotFound);
+            }
+            let (_, item) = self.root_item(sub)?;
+            return Ok(Ino { tree: sub, id: item.u64_at(168) });
         }
         Ok(Ino { tree: dir.tree, id: e.location.obj })
     }
-
     /// Lists a directory by DIR_INDEX, whose keys double as stable cookies.
     pub fn dir_list(&self, dir: Ino, cookie: u64, out: &mut dyn FnMut(u64, DirEntry) -> bool) -> Result<()> {
         let root = self.tree(dir.tree)?;

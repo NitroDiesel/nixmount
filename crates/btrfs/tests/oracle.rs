@@ -50,9 +50,11 @@ fn make_images(tag: &str, devices: usize, size: u64) -> Vec<PathBuf> {
 }
 
 fn mkfs(imgs: &[PathBuf], src: &Path, args: &[&str]) {
+    let root: Vec<&std::ffi::OsStr> =
+        if imgs.len() == 1 { vec!["--rootdir".as_ref(), src.as_os_str()] } else { vec![] };
     let st = Command::new("mkfs.btrfs")
-        .args(["-q", "-f", "--rootdir"])
-        .arg(src)
+        .args(["-q", "-f"])
+        .args(root)
         .args(args)
         .args(imgs)
         .status()
@@ -96,6 +98,29 @@ fn dump(tree: &Tree, dir: &Path) {
     }
 }
 
+
+/// `mkfs --rootdir` is single-device only, so multi-device tests load content themselves.
+fn populate(fs: &dyn Filesystem, tree: &Tree) {
+    for (p, c) in tree {
+        let (d, n) = p.rsplit_once('/').unwrap();
+        let dir = resolve(fs, d).unwrap();
+        match c {
+            Content::Dir => {
+                fs.create(dir, n.as_bytes(), NewNode::Dir, Owner { mode: 0o755, ..OWNER }).unwrap();
+            }
+            Content::Link(t) => {
+                fs.create(dir, n.as_bytes(), NewNode::Symlink(t), OWNER).unwrap();
+            }
+            Content::File(data) => {
+                let f = fs.create(dir, n.as_bytes(), NewNode::File, OWNER).unwrap();
+                if !data.is_empty() {
+                    fs.write(f, 0, data).unwrap();
+                }
+            }
+        }
+    }
+}
+
 fn round(tag: &str, devices: usize, args: &[&str]) {
     if !have_tools() {
         eprintln!("skipping {tag}: btrfs-progs not installed");
@@ -107,6 +132,13 @@ fn round(tag: &str, devices: usize, args: &[&str]) {
     let imgs = make_images(tag, devices, 512 << 20);
     mkfs(&imgs, &src, args);
     let want = host_tree(&src);
+    if devices > 1 {
+        let fs = open(&imgs, RW);
+        populate(&fs, &want);
+        fs.unmount().unwrap();
+        drop(fs);
+        check(&imgs[0], &format!("{tag}: populated"));
+    }
 
     let fs = open(&imgs, RO);
     assert_same(&walk(&fs).unwrap(), &want, &format!("{tag}: read"));
@@ -191,28 +223,6 @@ fn btrfs_raid1c3() {
     round("btrfs-raid1c3", 3, &["-d", "raid1c3", "-m", "raid1c3"]);
 }
 
-/// Parity profiles must read correctly, refuse writes, and survive a lost device.
-#[test]
-fn raid5_reads_and_rebuilds() {
-    if !have_tools() {
-        return;
-    }
-    let tag = "btrfs-raid5";
-    let out = out_dir();
-    let src = out.join(format!("{tag}.src"));
-    seed_tree(&src);
-    let imgs = make_images(tag, 3, 512 << 20);
-    mkfs(&imgs, &src, &["-d", "raid5", "-m", "raid1"]);
-    let want = host_tree(&src);
-    let fs = open(&imgs, RW);
-    assert!(fs.info().read_only);
-    assert_same(&walk(&fs).unwrap(), &want, tag);
-    drop(fs);
-    let fs = open(&imgs[..2], RO);
-    assert_same(&walk(&fs).unwrap(), &want, "raid5 with one device missing");
-    assert!(fs.info().notes.is_empty() || !fs.info().read_only == false);
-    let _ = std::fs::remove_dir_all(&src);
-}
 
 /// Snapshots share blocks: writing to either side must never show through to the other.
 #[test]

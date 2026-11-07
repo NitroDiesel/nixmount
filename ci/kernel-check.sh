@@ -60,3 +60,22 @@ sudo btrfs subvolume snapshot -r "$mnt" "$mnt/frozen" > /dev/null
 sync
 sudo umount "$mnt"
 sudo chown "$(id -u)" "$out"/kernel-*.image
+
+# RAID5: the engine reads it, and must also read it with any one device missing.
+src="$out/kernel-raid5.src"
+imgs=()
+for i in 0 1 2; do imgs+=("$out/kernel-raid5.$i.image"); truncate -s 512M "${imgs[$i]}"; done
+mkfs.btrfs -q -f -d raid5 -m raid1 "${imgs[@]}"
+mkdir -p "$src"
+head -c 5000000 /dev/urandom > "$src/random.bin"
+for i in $(seq 1 200); do echo "file $i" > "$src/f$i"; done
+sudo btrfs device scan "${imgs[@]}" 2>/dev/null || true
+loops=()
+for f in "${imgs[@]}"; do loops+=("$(sudo losetup -f --show "$f")"); done
+sudo btrfs device scan "${loops[@]}" > /dev/null
+sudo mount "${loops[0]}" "$mnt"
+sudo cp -r "$src/." "$mnt/"
+sync
+sudo umount "$mnt"
+sudo losetup -d "${loops[@]}"
+sudo chown "$(id -u)" "$out"/kernel-*.image

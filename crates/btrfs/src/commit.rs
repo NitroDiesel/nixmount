@@ -109,6 +109,8 @@ impl Fs {
     }
 
     fn commit_inner(&mut self) -> Result<()> {
+        // The superblock generation must match the root tree's header.
+        self.cow_root(ROOT_TREE)?;
         // Editing the bookkeeping trees creates more bookkeeping: run until it settles.
         for _ in 0..64 {
             self.run_delayed()?;
@@ -142,9 +144,11 @@ impl Fs {
         self.sb.put_u64(0x48, gen);
         self.sb.put_u64(0x50, self.root_tree.bytenr);
         self.sb.put_u8(0xC6, self.root_tree.level);
+        if self.sb.u64_at(0x58) != self.chunk_tree.bytenr {
+            self.sb.put_u64(0xA4, gen);
+        }
         self.sb.put_u64(0x58, self.chunk_tree.bytenr);
         self.sb.put_u8(0xC7, self.chunk_tree.level);
-        self.sb.put_u64(0xA4, gen);
         if self.compat_ro & RO_FREE_SPACE_TREE != 0 {
             self.sb.put_u64(0x22B, gen);
         } else {

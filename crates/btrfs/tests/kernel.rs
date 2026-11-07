@@ -72,3 +72,28 @@ fn edits_kernel_snapshots() {
     .unwrap();
     assert_eq!(seen, want.keys().filter(|k| k.matches('/').count() == 1).count());
 }
+
+/// Parity profiles must read correctly, refuse writes, and survive a lost device.
+#[test]
+fn raid5_reads_and_rebuilds() {
+    let Some(out) = dir() else { return };
+    let imgs: Vec<PathBuf> = (0..3).map(|i| out.join(format!("kernel-raid5.{i}.image"))).collect();
+    if !imgs[0].exists() {
+        return;
+    }
+    let want = host_tree(&out.join("kernel-raid5.src"));
+    let mount = |paths: &[PathBuf]| {
+        let devs: Vec<Arc<dyn BlockDev>> =
+            paths.iter().map(|p| Arc::new(FileDev::open(p, false).unwrap()) as Arc<dyn BlockDev>).collect();
+        Btrfs::open(devs, MountOpts { write: true, cache_bytes: 0 }).unwrap()
+    };
+    let fs = mount(&imgs);
+    assert!(fs.info().read_only);
+    assert_same(&walk(&fs).unwrap(), &want, "raid5");
+    drop(fs);
+    for skip in 0..3 {
+        let some: Vec<PathBuf> = imgs.iter().enumerate().filter(|(i, _)| *i != skip).map(|x| x.1.clone()).collect();
+        let fs = mount(&some);
+        assert_same(&walk(&fs).unwrap(), &want, &format!("raid5 without device {skip}"));
+    }
+}

@@ -68,7 +68,7 @@ impl Fs {
         Ok(new)
     }
 
-    fn cow_root(&mut self, tree: u64) -> Result<Root> {
+    pub fn cow_root(&mut self, tree: u64) -> Result<Root> {
         let r = self.tree_for_write(tree)?;
         let new = self.cow(tree, r.bytenr, r.level)?;
         let root = Root { bytenr: new, level: r.level };
