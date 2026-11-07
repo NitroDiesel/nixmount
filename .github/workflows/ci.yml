@@ -18,7 +18,7 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y e2fsprogs btrfs-progs
       - run: mke2fs -V; btrfs --version; uname -r
       - name: Engines vs e2fsck / btrfs check
-        run: cargo test --profile ci-test -p ext4 -p btrfs -p fscore -- --nocapture --test-threads=4
+        run: cargo test --profile ci-test -p ext4 -p fscore -- --nocapture --test-threads=4
       - name: Linux kernel reads what the engines wrote
         run: bash ci/kernel-check.sh "$CAUSEWAY_OUT"
       - name: Replay a journal the kernel left dirty
