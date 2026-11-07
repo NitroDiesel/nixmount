@@ -59,10 +59,19 @@ pub fn secure_directory() -> Result<(), String> {
         &["/inheritance:r", "/grant:r", "*S-1-5-18:(OI)(CI)F", "/grant:r", "*S-1-5-32-544:(OI)(CI)F", "/T", "/C"],
     ];
     for args in steps {
-        let ok = std::process::Command::new("icacls").arg(&d).args(args).output().is_ok_and(|o| o.status.success());
+        let icacls = crate::install::system_dir().join("icacls.exe");
+        let ok = std::process::Command::new(icacls).arg(&d).args(args).output().is_ok_and(|o| o.status.success());
         if !ok {
             return Err(format!("could not secure {}", d.display()));
         }
     }
     Ok(())
+}
+
+/// Deletes saved settings when uninstalling.
+pub fn remove() {
+    let d = dir();
+    let _ = std::fs::remove_file(path());
+    let _ = std::fs::remove_file(d.join("config.tmp"));
+    let _ = std::fs::remove_dir(d);
 }

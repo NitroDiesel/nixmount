@@ -147,6 +147,11 @@ pub fn install_dir() -> Option<std::path::PathBuf> {
     Some(String::from_utf16_lossy(&buf[..n]).into())
 }
 
+/// Whether the driver is on this machine, without loading it.
+pub fn driver_present() -> bool {
+    install_dir().is_some_and(|d| d.join("bin").join("winfsp-x64.dll").exists())
+}
+
 pub fn available() -> bool {
     api().is_ok()
 }

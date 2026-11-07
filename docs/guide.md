@@ -2,17 +2,21 @@
 
 ## Install
 
-Causeway needs [WinFsp](https://winfsp.dev/rel/) for drive letters. Browsing and exporting
-work without it.
+Run `Causeway-Setup.exe` and approve the administrator prompt, which is needed because only
+administrators can read raw disks. Then select **Install**, or run `causeway install`.
 
-Run `causeway.exe`. It asks for administrator rights, because raw disks are only readable by
-administrators. Choose **Install service** in the window, or run `causeway service install`.
-This copies the program to `C:\Program Files\Causeway` and starts a small background service.
-Mounts belong to the service, so they stay up after you close the window, are visible to every
-user on the PC, and are closed cleanly at shutdown.
+Everything comes in that one file. Setup copies the program to `C:\Program Files\Causeway`, adds
+it to the Start menu, installs the WinFsp driver it carries, and starts a small background
+service. Mounts belong to the service, so they stay up after you close the window, are visible
+to every user on the PC, and are closed cleanly at shutdown.
 
-To remove it, run `causeway service uninstall` from any copy other than the installed one.
-WinFsp stays installed: remove it from Windows Settings if nothing else needs it.
+Running a newer `Causeway-Setup.exe` upgrades in place. Mounted volumes are closed cleanly first.
+
+Without installing, the same file can still **Browse files** and export them.
+
+To remove Causeway, use **Installed apps** in Windows Settings, or run `causeway uninstall`. This
+removes everything setup added, including the driver. If WinFsp was already on the PC before
+Causeway, it stays, since something else may need it.
 
 ## Mount a volume
 
@@ -53,12 +57,15 @@ write fails, the volume switches to read-only and says so rather than continuing
 **Browse files** opens the volume read-only inside the window. Select a file or folder and use
 **Export** to copy it to a Windows folder. Nothing is mounted and nothing on the volume changes.
 
+## Verify a volume
+
+**Verify checksums** checks a mounted volume. On Btrfs it reads every copy of all metadata and
+data, and repairs bad copies from good ones when the volume is writable and has redundancy. On
+ext4 it checks metadata, since ext4 has no checksums for file contents.
+
 ## Snapshots
 
-On a mounted Btrfs volume, **Snapshot** makes a read-only snapshot at the top of the volume, and
-**Verify checksums** reads every copy of all data, repairing bad copies from good ones when the
-volume is writable and has redundancy.
-
+On a mounted Btrfs volume, **Snapshot** makes a read-only snapshot at the top of the volume.
 Mounted volumes list their snapshots and subvolumes. Click one to delete it. The space comes
 back the next time Linux mounts the volume read-write.
 
@@ -101,7 +108,8 @@ causeway snapshot L: before-upgrade --read-only
 causeway subvolume delete L: before-upgrade
 ```
 
-`causeway list` shows the disk and partition numbers. Run from an elevated prompt.
+`causeway list` shows the disk and partition numbers. Run from an elevated prompt. Causeway is a
+windowed program, so a PowerShell script should end commands with `| Out-Host` to wait for them.
 
 ## Troubleshooting
 
@@ -119,5 +127,5 @@ writable, was not shut down cleanly in a way that can't be recovered here, or ha
 errors. The window lists the reason. Most clear after mounting it once in Linux or running
 `e2fsck`.
 
-**The service won't start.** Check that WinFsp is installed, then run
+**The service won't start.** Run setup again to repair it, or run
 `causeway service debug` from an elevated prompt to watch it run.

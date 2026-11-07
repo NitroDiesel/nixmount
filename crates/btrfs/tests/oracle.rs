@@ -368,9 +368,20 @@ fn full_disk() {
     let imgs = make_images(tag, 1, 256 << 20);
     mkfs(&imgs, &src, &[]);
     let fs = open(&imgs, RW);
+    // Fill it completely, then keep going: creating, overwriting, renaming and deleting.
+    let ballast = fs.create(fs.root(), b"ballast", NewNode::File, OWNER).unwrap();
+    let chunk = vec![0xABu8; 1 << 20];
+    let mut at = 0;
+    loop {
+        match fs.write(ballast, at, &chunk) {
+            Ok(n) => at += n as u64,
+            Err(fscore::FsError::NoSpace) => break,
+            Err(e) => panic!("{tag}: filling failed: {e}"),
+        }
+    }
+    assert!(!fs.info().read_only, "{tag}: {:?}", fs.info().ro_reasons);
     let mut model = Model::from_tree(&walk(&fs).unwrap());
-    random_ops(&fs, &mut model, &mut Rng(0xF011), 1500, 3_000_000);
-    assert!(fs.info().free_bytes < 64 << 20, "{tag}: the test never filled the volume");
+    random_ops(&fs, &mut model, &mut Rng(0xF011), 1000, 300_000);
     assert!(!fs.info().read_only, "{tag}: {:?}", fs.info().ro_reasons);
     assert_same(&walk(&fs).unwrap(), &model.tree(), &format!("{tag}: live"));
     fs.unmount().unwrap();

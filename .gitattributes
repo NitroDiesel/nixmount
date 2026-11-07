@@ -2,3 +2,4 @@
 *.gz binary
 *.ico binary
 *.png binary
+*.msi binary

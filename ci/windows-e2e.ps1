@@ -1,8 +1,20 @@
-# End-to-end on a real Windows machine: the real service, WinFsp and drive letters. The
+# End-to-end on a real Windows machine with no WinFsp installed: the one-step setup, the real
+# service and driver, drive letters, raw partitions and hotplug, then a full uninstall. The
 # images it leaves behind go to the Linux job, where e2fsck and btrfs check judge them.
 param([string]$Exe, [string]$Out)
 $ErrorActionPreference = 'Stop'
 New-Item -ItemType Directory -Force $Out | Out-Null
+$Out = (Resolve-Path $Out).Path
+$driver = "${env:ProgramFiles(x86)}\WinFsp\bin\winfsp-x64.dll"
+$program = "$env:ProgramFiles\Causeway"
+$arp = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Causeway'
+$link = "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\Causeway.lnk"
+
+# The program is a GUI executable: PowerShell only waits for it when its output is piped.
+function Causeway {
+    & $Exe @args | Out-Host
+    if ($LASTEXITCODE) { throw "causeway $args failed with $LASTEXITCODE" }
+}
 
 function Expand-Fixture($name) {
     $src = [IO.File]::OpenRead("tests/fixtures/$name.img.gz")
@@ -10,7 +22,7 @@ function Expand-Fixture($name) {
     $dst = [IO.File]::Create("$Out/$name.img")
     $gz.CopyTo($dst)
     $dst.Close(); $gz.Close(); $src.Close()
-    (Resolve-Path "$Out/$name.img").Path
+    "$Out\$name.img"
 }
 
 function Check($what, $ok) {
@@ -27,14 +39,20 @@ function Wait-For($condition) {
     $false
 }
 
-& $Exe service install
-if ($LASTEXITCODE) { throw 'service install failed' }
+Check 'the machine starts without the driver' (-not (Test-Path $driver))
+Causeway install
+Check 'setup installed the bundled driver' (Test-Path $driver)
+Check 'setup started the service' ((Get-Service Causeway).Status -eq 'Running')
+Check 'setup installed to Program Files' (Test-Path "$program\causeway.exe")
+Check 'setup added a Start menu entry' (Test-Path $link)
+Check 'setup is listed in installed apps' (Test-Path $arp)
+Causeway install
+Check 'running setup again keeps the service running' ((Get-Service Causeway).Status -eq 'Running')
 
 foreach ($item in @(@('ext4-default', 'K'), @('btrfs-default', 'L'))) {
     $name, $d = $item
     $img = Expand-Fixture $name
-    & $Exe mount $img "${d}:" --rw
-    if ($LASTEXITCODE) { throw "mount failed for $name" }
+    Causeway mount $img "${d}:" --rw
     $root = "${d}:\"
 
     Check "$name lists seeded files" ((Get-Content "${root}hello.txt") -eq 'hello from linux')
@@ -64,39 +82,39 @@ foreach ($item in @(@('ext4-default', 'K'), @('btrfs-default', 'L'))) {
     Check "$name reports disk full" $failed
     Remove-Item "${root}fill.bin" -ErrorAction SilentlyContinue
 
-    & $Exe scrub "${d}:"
-    if ($LASTEXITCODE) { throw "scrub failed for $name" }
-    & $Exe unmount "${d}:"
-    if ($LASTEXITCODE) { throw "unmount failed for $name" }
+    Causeway scrub "${d}:"
+    Causeway unmount "${d}:"
     Check "$name drive letter is gone" (-not (Test-Path $root))
 }
 
 # Read-only mounts must not change a single byte.
 $img = Expand-Fixture 'ext3-1k'
 $before = (Get-FileHash $img).Hash
-& $Exe mount $img 'M:'
+Causeway mount $img 'M:'
 Check 'read-only mount serves files' ((Get-Content 'M:\hello.txt') -eq 'hello from linux')
 $blocked = $false
 try { Set-Content 'M:\nope.txt' 'x' -ErrorAction Stop } catch { $blocked = $true }
 Check 'read-only mount refuses writes' $blocked
-& $Exe unmount 'M:'
+Causeway unmount 'M:'
 Check 'read-only mount left the image untouched' ($before -eq (Get-FileHash $img).Hash)
 
 # Raw partition access, the real-disk path, on a virtual disk so nothing real is touched.
 # A fixed VHD is a plain disk image, so the filesystem can be placed with ordinary file I/O.
-$vhd = Join-Path (Resolve-Path $Out).Path 'disk.vhd'
-$create = Join-Path (Resolve-Path $Out).Path 'create.txt'
-$attach = Join-Path (Resolve-Path $Out).Path 'attach.txt'
-$detach = Join-Path (Resolve-Path $Out).Path 'detach.txt'
+$vhd = "$Out\disk.vhd"
+$create = "$Out\create.txt"
+# A run that stopped early can leave its disk behind.
+if (Test-Path $vhd) {
+    Dismount-DiskImage -ImagePath $vhd -ErrorAction SilentlyContinue | Out-Null
+    Remove-Item $vhd
+}
 "create vdisk file=`"$vhd`" maximum=64 type=fixed`nselect vdisk file=`"$vhd`"`nattach vdisk`nconvert mbr`ncreate partition primary id=83`ndetach vdisk" |
     Set-Content $create -Encoding ascii
-"select vdisk file=`"$vhd`"`nattach vdisk" | Set-Content $attach -Encoding ascii
-"select vdisk file=`"$vhd`"`ndetach vdisk" | Set-Content $detach -Encoding ascii
 diskpart /s $create | Out-Null
 if ($LASTEXITCODE) { throw 'could not create the virtual disk' }
 
-$fixture = Expand-Fixture 'ext4-default'
+$fixture = Expand-Fixture 'ext4-1k-nocsum'
 $image = [IO.File]::ReadAllBytes($fixture)
+Remove-Item $fixture
 $f = [IO.File]::Open($vhd, 'Open', 'ReadWrite')
 $mbr = New-Object byte[] 512
 [void]$f.Read($mbr, 0, 512)
@@ -105,37 +123,33 @@ $offset = [BitConverter]::ToUInt32($mbr, 446 + 8) * 512L
 $f.Write($image, 0, $image.Length)
 $f.Close()
 
-diskpart /s $attach | Out-Null
+Mount-DiskImage -ImagePath $vhd -NoDriveLetter | Out-Null
 try {
     $disk = (Get-DiskImage -ImagePath $vhd).Number
     $part = (Get-Partition -DiskNumber $disk | Select-Object -First 1).PartitionNumber
-    & $Exe mount "${disk}:${part}" 'J:' --rw
-    if ($LASTEXITCODE) { throw 'mount of the raw partition failed' }
+    Causeway mount "${disk}:${part}" 'J:' --rw
     Check 'raw partition serves files' ((Get-Content 'J:\hello.txt') -eq 'hello from linux')
     Set-Content 'J:\raw.txt' 'written through the raw device'
     New-Item -ItemType Directory 'J:\rawdir' | Out-Null
     Copy-Item "$env:WINDIR\notepad.exe" 'J:\rawdir\copy.exe'
     Check 'raw partition copy is byte-exact' ((Get-FileHash "$env:WINDIR\notepad.exe").Hash -eq (Get-FileHash 'J:\rawdir\copy.exe').Hash)
     Check 'a locked read-write mount stays listed' ((& $Exe list | Out-String) -match "${disk}:${part}")
-    & $Exe unmount 'J:'
-    if ($LASTEXITCODE) { throw 'unmount of the raw partition failed' }
+    Causeway unmount 'J:'
 
     # Hotplug: a remembered volume mounts itself on arrival, and unplugging frees the letter.
-    & $Exe automount on "${disk}:${part}" 'J:'
-    if ($LASTEXITCODE) { throw 'could not enable automount' }
-    diskpart /s $detach | Out-Null
-    diskpart /s $attach | Out-Null
+    Causeway automount on "${disk}:${part}" 'J:'
+    Dismount-DiskImage -ImagePath $vhd | Out-Null
+    Mount-DiskImage -ImagePath $vhd -NoDriveLetter | Out-Null
     Check 'a remembered volume mounts itself when plugged in' (Wait-For { Test-Path 'J:\hello.txt' })
-    diskpart /s $detach | Out-Null
+    Dismount-DiskImage -ImagePath $vhd | Out-Null
     Check 'unplugging a mounted volume frees its drive letter' (Wait-For { -not (Test-Path 'J:\') })
-    diskpart /s $attach | Out-Null
+    Mount-DiskImage -ImagePath $vhd -NoDriveLetter | Out-Null
     [void](Wait-For { Test-Path 'J:\hello.txt' })
     $disk = (Get-DiskImage -ImagePath $vhd).Number
-    & $Exe unmount 'J:'
-    & $Exe automount off "${disk}:${part}"
-    if ($LASTEXITCODE) { throw 'could not disable automount' }
+    Causeway unmount 'J:'
+    Causeway automount off "${disk}:${part}"
 } finally {
-    diskpart /s $detach | Out-Null
+    Dismount-DiskImage -ImagePath $vhd | Out-Null
 }
 
 # Hand the partition's contents to the Linux job.
@@ -144,8 +158,14 @@ $f = [IO.File]::OpenRead($vhd)
 $back = New-Object byte[] $image.Length
 [void]$f.Read($back, 0, $back.Length)
 $f.Close()
-[IO.File]::WriteAllBytes((Join-Path (Resolve-Path $Out).Path 'ext4-raw.img'), $back)
-Remove-Item $vhd, $create, $attach, $detach
+[IO.File]::WriteAllBytes("$Out\ext4-raw.img", $back)
+Remove-Item $vhd, $create
 
-& $Exe service uninstall
+# Uninstalling reverses all of it, including the driver setup brought.
+Causeway uninstall
+Check 'uninstall removed the service' (-not (Get-Service Causeway -ErrorAction SilentlyContinue))
+Check 'uninstall removed the bundled driver' (-not (Test-Path $driver))
+Check 'uninstall removed the program' (-not (Test-Path $program))
+Check 'uninstall removed the Start menu entry' (-not (Test-Path $link))
+Check 'uninstall removed the installed apps entry' (-not (Test-Path $arp))
 'All end-to-end checks passed.'

@@ -24,10 +24,10 @@ disk: volumes aren't encrypted, and Linux permissions aren't enforced on Windows
   is used.
 - **Symlinks stay inside.** Link targets are resolved against the volume root, as in a chroot.
   A link can't point at `C:\` or climb out of the volume with `..`.
-- **Names can't become paths.** `:`, `\` and other syntax in Linux names are remapped, so a file
-  can't address an NTFS stream or another directory. Export also refuses `.` and `..`, renames
-  Windows device names such as `NUL`, limits folder depth, and doesn't
-  follow symlinks, so a volume can't write outside the folder you chose.
+- **Names can't become paths.** `:`, `\`, `/` and other path syntax in names are remapped, so a
+  file can't address an NTFS stream or another directory. Export also skips `.` and `..`, renames
+  Windows device names such as `NUL`, limits folder depth and doesn't follow symlinks, so a volume
+  can't write outside the folder you chose.
 
 ## The service
 
@@ -38,10 +38,22 @@ The service runs as SYSTEM, so its boundaries matter:
 - Messages are size-limited and decoded with a schema, not parsed by hand.
 - It runs from `Program Files`, not from wherever it was downloaded, and its path is quoted. A
   service binary in a user-writable folder would be a privilege-escalation hole.
-- `%ProgramData%\Causeway` is restricted to SYSTEM and Administrators. It decides what the service
-  mounts.
+- `%ProgramData%\Causeway` decides what the service mounts, so installing resets it to SYSTEM and
+  Administrators only. Any user can create folders there, so it may already exist with a hostile
+  owner or ACL, and the install stops if those can't be replaced.
 - WinFsp's DLL is loaded by absolute path from the registry, which keeps DLL search-order attacks
   out of the process.
+
+## Setup
+
+Setup runs elevated from wherever it was downloaded to, usually a folder others can write to, which
+makes installers a classic target:
+
+- The executable is linked so that its imported DLLs load from `System32` only, never from next to
+  the file. Tools it runs are found through the Windows system directory, not the search path.
+- The bundled WinFsp installer is unpacked into the admin-only program folder, never a temporary
+  one, so it can't be swapped between being written and being run.
+- That installer is the official signed release, unmodified, and CI checks it against a pinned hash.
 
 ## Data safety
 
@@ -66,6 +78,8 @@ The service runs as SYSTEM, so its boundaries matter:
 - Volume-level permissions: every signed-in user can read a mounted volume. See the
   [guide](guide.md#permissions).
 - WinFsp is part of the trusted base, as a kernel driver maintained by its own project.
+- `Causeway-Setup.exe` isn't code-signed, so Windows can't vouch for it. Check it against the
+  published SHA-256 hash, or build it from source.
 - Automount trusts a volume's UUID, which a crafted disk can copy. A disk with a remembered UUID
   gets mounted with the remembered options, including writing. It is still parsed with all the
   protections above.

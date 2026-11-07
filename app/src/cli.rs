@@ -29,7 +29,9 @@ Usage:
   causeway scrub <X:>             Verify checksums on a mounted volume
   causeway snapshot <X:> <name> [--read-only]    Snapshot a mounted Btrfs volume
   causeway subvolume list|create|delete <X:> [name]    Manage Btrfs subvolumes and snapshots
-  causeway service install|uninstall|run|debug
+  causeway install                Set up everything, including the driver
+  causeway uninstall              Remove everything setup added
+  causeway service run|debug      Run the service (debug: in this console)
 
 A target is an image file (optionally file#partition) or disk:partition, e.g. 1:3.
 
@@ -56,7 +58,7 @@ fn call(r: &Request) -> Result<Response, String> {
     match ipc::call(r) {
         Ok(Response::Error(e)) => Err(e),
         Ok(r) => Ok(r),
-        Err(_) => Err("the Causeway service isn't running: run `causeway service install` as administrator".into()),
+        Err(_) => Err("the Causeway service isn't running: run `causeway install`".into()),
     }
 }
 
@@ -229,6 +231,19 @@ pub fn run(mut args: Vec<String>) -> Result<(), String> {
     let arg = |i: usize| args.get(i).cloned().ok_or_else(|| format!("missing argument\n\n{USAGE}"));
     match cmd.as_str() {
         "help" | "--help" | "-h" | "/?" => println!("{USAGE}"),
+        "install" | "uninstall" if !crate::install::elevated() => {
+            if !crate::install::relaunch_elevated(&cmd) {
+                return Err("administrator rights are needed".into());
+            }
+        }
+        "install" => {
+            crate::install::install()?;
+            println!("Causeway is installed.");
+        }
+        "uninstall" => {
+            crate::install::uninstall()?;
+            println!("Causeway is removed.");
+        }
         "list" => {
             let vols = match ipc::call(&Request::Scan) {
                 Ok(Response::Volumes(v)) => v,
@@ -331,8 +346,6 @@ pub fn run(mut args: Vec<String>) -> Result<(), String> {
             _ => return Err(USAGE.into()),
         },
         "service" => match arg(0)?.as_str() {
-            "install" => crate::service::install()?,
-            "uninstall" => crate::service::uninstall()?,
             "run" => crate::service::run()?,
             "debug" => crate::service::run_foreground()?,
             _ => return Err(USAGE.into()),

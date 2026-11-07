@@ -18,7 +18,7 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y e2fsprogs btrfs-progs
       - run: mke2fs -V; btrfs --version; uname -r
       - name: Engines vs e2fsck / btrfs check
-        run: cargo test --profile ci-test -p ext4 -p btrfs -p fscore -- --nocapture --test-threads=4
+        run: cargo test --no-fail-fast --profile ci-test -p ext4 -p btrfs -p fscore -- --nocapture --test-threads=4
       - name: Linux kernel reads what the engines wrote
         run: bash ci/kernel-check.sh "$CAUSEWAY_OUT"
       - name: Kernel-made images (dirty journals, compression, shared snapshots)
@@ -43,10 +43,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release --locked -p causeway
       - run: cargo test -p fscore -p ext4 -p btrfs -p causeway
-      - run: choco install winfsp -y --no-progress
       - name: End to end through the real service and WinFsp
         shell: pwsh
         run: ci/windows-e2e.ps1 -Exe (Resolve-Path target/release/causeway.exe).Path -Out e2e
+      - name: The bundled installer is the official, unmodified release
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash app/res/winfsp-2.1.25156.msi).Hash
+          if ($hash -ne "073A70E00F77423E34BED98B86E600DEF93393BA5822204FAC57A29324DB9F7A") { throw "unexpected MSI: $hash" }
       - uses: actions/upload-artifact@v4
         with:
           name: causeway-windows-x64

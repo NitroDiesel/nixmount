@@ -12,6 +12,8 @@ mod disk;
 #[cfg(windows)]
 mod gui;
 #[cfg(windows)]
+mod install;
+#[cfg(windows)]
 mod ipc;
 #[cfg(windows)]
 mod mounts;

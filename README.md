@@ -11,7 +11,8 @@ can't crash Windows.
 
 | | Ext4Fsd + WinBtrfs | Causeway |
 |---|---|---|
-| Runs as | Two kernel drivers | One 2 MB program, on the Microsoft-signed [WinFsp] driver |
+| Install | Separate installers per project | One 4 MB file, nothing else to download |
+| Runs as | Two kernel drivers | One program, using the Microsoft-signed [WinFsp] driver it carries |
 | Bad data on disk | Can crash the machine | An error on that request |
 | ext4 writes | Not journaled | Journaled through the real jbd2 log |
 | Mounting read-only | May replay the journal to disk | Never writes: recovery happens in memory |
@@ -21,12 +22,15 @@ can't crash Windows.
 
 ## Getting started
 
-1. Install [WinFsp].
-2. Run `causeway.exe` and choose **Install service**.
-3. Pick a volume and choose **Mount**.
+1. Download `Causeway-Setup.exe` from [Releases](../../releases) and run it.
+2. Select **Install**. This is the only setup step: the driver is included.
+3. Pick a volume and select **Mount**.
 
 Volumes mount read-only until you turn on **Allow writing**. To look through a volume or copy
 files out without installing anything, use **Browse files**.
+
+Windows may warn about an unrecognized app the first time, because the file isn't code-signed.
+Select **More info**, then **Run anyway**.
 
 ## How far to trust it
 

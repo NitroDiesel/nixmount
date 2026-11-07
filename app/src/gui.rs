@@ -109,8 +109,7 @@ enum Act {
     BrowseUp,
     BrowseRow(usize),
     Export,
-    InstallService,
-    GetWinFsp,
+    Install,
     WinFspHome,
     Dismiss,
 }
@@ -400,14 +399,9 @@ impl App {
             }
             Act::BrowseRow(i) => self.browse_row(i),
             Act::Export => self.export(),
-            Act::InstallService => self.install_service(),
+            Act::Install => self.install(),
             Act::WinFspHome => {
                 let (verb, url) = (wide("open"), wide("https://github.com/winfsp/winfsp"));
-                // SAFETY: strings are NUL-terminated.
-                unsafe { ShellExecuteW(self.hwnd, verb.as_ptr(), url.as_ptr(), null(), null(), SW_SHOW) };
-            }
-            Act::GetWinFsp => {
-                let (verb, url) = (wide("open"), wide("https://winfsp.dev/rel/"));
                 // SAFETY: strings are NUL-terminated.
                 unsafe { ShellExecuteW(self.hwnd, verb.as_ptr(), url.as_ptr(), null(), null(), SW_SHOW) };
             }
@@ -550,11 +544,11 @@ impl App {
         });
     }
 
-    fn install_service(&mut self) {
-        self.set_busy("Installing the service…");
+    fn install(&mut self) {
+        self.set_busy("Installing…");
         let w = self.wnd();
-        std::thread::spawn(move || match crate::service::install() {
-            Ok(()) => w.post(Msg::Done { note: Some("Service installed".into()) }),
+        std::thread::spawn(move || match crate::install::install() {
+            Ok(()) => w.post(Msg::Done { note: Some("Causeway is installed and ready".into()) }),
             Err(e) => w.post(Msg::Failed(e)),
         });
     }
@@ -811,8 +805,8 @@ impl App {
         let sy = by + bh + p(&self.canvas, 12.0);
         let (dot, label) = match (&self.service, self.winfsp) {
             (Service::Ready, true) => (t.ok, "Service running"),
-            (Service::Ready, false) => (t.warn, "WinFsp not installed"),
-            (Service::Missing, _) => (t.warn, "Service not installed"),
+            (Service::Ready, false) => (t.warn, "Driver missing"),
+            (Service::Missing, _) => (t.warn, "Not installed yet"),
             (Service::Unknown, _) => (t.muted, "Connecting…"),
         };
         let radius = p(&self.canvas, 4.0);
@@ -843,25 +837,16 @@ impl App {
     fn paint_setup(&mut self, r: Rect, y: i32) -> i32 {
         let t = self.theme();
         let radius = self.canvas.px(8.0);
-        let (title, text, label, act) = if !self.winfsp {
-            (
-                "Install WinFsp to get drive letters",
-                "WinFsp is a free, Microsoft-signed driver that lets Causeway show volumes in Explorer. Browsing and \
-                 exporting work without it.",
-                "Get WinFsp",
-                Act::GetWinFsp,
-            )
-        } else if self.service == Service::Missing {
-            (
-                "Finish setting up",
-                "A small background service keeps volumes mounted after this window closes and detaches them cleanly at \
-                 shutdown.",
-                "Install service",
-                Act::InstallService,
-            )
-        } else {
+        if self.service == Service::Unknown || (self.service == Service::Ready && self.winfsp) {
             return y;
-        };
+        }
+        let (title, text, label, act) = (
+            "Install Causeway",
+            "One step sets up the driver and background service that give volumes a drive letter. Everything is \
+             included, with nothing else to download.",
+            "Install",
+            Act::Install,
+        );
         let inner = r.w - self.canvas.px(32.0);
         let tw = inner - self.canvas.px(170.0);
         let h = self.canvas.px(88.0);
@@ -1402,35 +1387,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
     }
 }
 
-/// True when this process holds a full administrator token.
-fn elevated() -> bool {
-    use windows_sys::Win32::Security::{GetTokenInformation, TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY};
-    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
-    let mut tok = null_mut();
-    let mut e = TOKEN_ELEVATION { TokenIsElevated: 0 };
-    let mut n = 0;
-    // SAFETY: out-pointers are valid; the token is closed below.
-    unsafe {
-        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut tok) == 0 {
-            return false;
-        }
-        let ok = GetTokenInformation(tok, TokenElevation, (&raw mut e).cast(), 4, &mut n);
-        CloseHandle(tok);
-        ok != 0 && e.TokenIsElevated != 0
-    }
-}
-
-/// Relaunches through UAC. Raw disks and the service pipe are admin-only by design.
-fn relaunch_elevated() -> bool {
-    let Ok(exe) = std::env::current_exe() else { return false };
-    let (verb, path) = (wide("runas"), wide(&exe.to_string_lossy()));
-    // SAFETY: strings are NUL-terminated.
-    let r = unsafe { ShellExecuteW(null_mut(), verb.as_ptr(), path.as_ptr(), null(), null(), SW_SHOWNORMAL) };
-    r as isize > 32
-}
-
 pub fn run() {
-    if !elevated() && relaunch_elevated() {
+    // Raw disks and the service pipe are admin-only by design.
+    if !crate::install::elevated() && crate::install::relaunch_elevated("") {
         return;
     }
     let class = wide("CausewayWindow");

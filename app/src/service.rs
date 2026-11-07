@@ -253,30 +253,57 @@ fn manager() -> Result<ScHandle, String> {
     Ok(ScHandle(h))
 }
 
-fn install_dir() -> Result<std::path::PathBuf, String> {
-    let base = std::env::var_os("ProgramW6432").or_else(|| std::env::var_os("ProgramFiles"));
-    Ok(std::path::PathBuf::from(base.ok_or("no Program Files directory")?).join("Causeway"))
+fn open_service(sc: &ScHandle) -> Option<ScHandle> {
+    let name = wide(NAME);
+    // SAFETY: `name` is NUL-terminated.
+    let h = unsafe { OpenServiceW(sc.0, name.as_ptr(), SERVICE_ALL_ACCESS) };
+    (!h.is_null()).then_some(ScHandle(h))
 }
 
-/// Copies the executable to where the service will run it from. A SYSTEM service must
-/// not start from a directory an ordinary user can write to.
-fn install_location() -> Result<std::path::PathBuf, String> {
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let dir = install_dir()?;
-    let dest = dir.join("causeway.exe");
-    if exe != dest {
-        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-        std::fs::copy(&exe, &dest).map_err(|e| format!("could not copy to {}: {e}", dest.display()))?;
+fn start(svc: &ScHandle) -> Result<(), String> {
+    const ERROR_SERVICE_ALREADY_RUNNING: i32 = 1056;
+    // SAFETY: `svc` is open.
+    if unsafe { StartServiceW(svc.0, 0, null()) } == 0 {
+        let e = std::io::Error::last_os_error();
+        if e.raw_os_error() != Some(ERROR_SERVICE_ALREADY_RUNNING) {
+            return Err(format!("the service could not start: {e}"));
+        }
     }
-    Ok(dest)
+    Ok(())
 }
 
-pub fn install() -> Result<(), String> {
-    crate::config::secure_directory()?;
-    let exe = install_location()?;
+/// Stops the service and waits for it to exit, which commits and detaches every mount.
+fn stop_and_wait(svc: &ScHandle) {
+    // SAFETY: an all-zero SERVICE_STATUS is valid; `svc` is open.
+    let mut st: SERVICE_STATUS = unsafe { std::mem::zeroed() };
+    // SAFETY: as above. Failure means it wasn't running, which the loop below sees.
+    unsafe { ControlService(svc.0, SERVICE_CONTROL_STOP, &mut st) };
+    for _ in 0..300 {
+        // SAFETY: `st` is valid for the call.
+        if unsafe { QueryServiceStatus(svc.0, &mut st) } == 0 || st.dwCurrentState == SERVICE_STOPPED {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+}
+
+/// Stops the service if it exists, so its executable can be replaced.
+pub fn stop() -> Result<(), String> {
+    let sc = manager()?;
+    if let Some(svc) = open_service(&sc) {
+        stop_and_wait(&svc);
+    }
+    Ok(())
+}
+
+/// Creates the service for `exe` if needed, and starts it.
+pub fn register(exe: &std::path::Path) -> Result<(), String> {
+    let sc = manager()?;
+    if let Some(svc) = open_service(&sc) {
+        return start(&svc);
+    }
     // Quoted, or a path with spaces becomes a privilege-escalation hole.
     let cmd = wide(&format!("\"{}\" service run", exe.display()));
-    let sc = manager()?;
     let (name, display) = (wide(NAME), wide("Causeway Volume Service"));
     let deps = wide("WinFsp.Launcher\0");
     // SAFETY: all strings are NUL-terminated.
@@ -308,49 +335,18 @@ pub fn install() -> Result<(), String> {
     unsafe {
         ChangeServiceConfig2W(svc.0, SERVICE_CONFIG_DESCRIPTION, (&raw const d).cast());
         ChangeServiceConfig2W(svc.0, SERVICE_CONFIG_PRESHUTDOWN_INFO, (&raw mut pre).cast());
-        if StartServiceW(svc.0, 0, null()) == 0 {
-            return Err(format!("installed, but could not start: {}", std::io::Error::last_os_error()));
-        }
+    }
+    start(&svc)
+}
+
+/// Stops and deletes the service, if there is one.
+pub fn unregister() -> Result<(), String> {
+    let sc = manager()?;
+    let Some(svc) = open_service(&sc) else { return Ok(()) };
+    stop_and_wait(&svc);
+    // SAFETY: `svc` is open.
+    if unsafe { DeleteService(svc.0) } == 0 {
+        return Err(std::io::Error::last_os_error().to_string());
     }
     Ok(())
-}
-
-pub fn uninstall() -> Result<(), String> {
-    let sc = manager()?;
-    let name = wide(NAME);
-    // SAFETY: `name` is NUL-terminated.
-    let h = unsafe { OpenServiceW(sc.0, name.as_ptr(), SERVICE_ALL_ACCESS) };
-    if h.is_null() {
-        return Err("the service isn't installed".into());
-    }
-    let svc = ScHandle(h);
-    // SAFETY: an all-zero SERVICE_STATUS is valid; `svc` is open.
-    unsafe {
-        let mut st = std::mem::zeroed();
-        ControlService(svc.0, SERVICE_CONTROL_STOP, &mut st);
-        if DeleteService(svc.0) == 0 {
-            return Err(std::io::Error::last_os_error().to_string());
-        }
-    }
-    drop(svc);
-    remove_installed_copy()
-}
-
-/// Deletes what `install` copied. A running program can't delete itself, so uninstalling
-/// from the installed copy leaves it behind and says so.
-fn remove_installed_copy() -> Result<(), String> {
-    let dir = install_dir()?;
-    let dest = dir.join("causeway.exe");
-    if std::env::current_exe().map_err(|e| e.to_string())? == dest {
-        return Err(format!("the service is removed; delete {} to finish", dir.display()));
-    }
-    // The service process needs a moment to exit and release the file.
-    for _ in 0..50 {
-        if std::fs::remove_file(&dest).is_ok() || !dest.exists() {
-            let _ = std::fs::remove_dir(&dir);
-            return Ok(());
-        }
-        std::thread::sleep(std::time::Duration::from_millis(200));
-    }
-    Err(format!("could not delete {}", dest.display()))
 }

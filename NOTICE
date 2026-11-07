@@ -13,8 +13,9 @@ Btrfs. No source file from either project was copied or translated. This matters
 GPL-2.0-only and LGPL-3.0 code cannot be combined in one program. GPL-2.0 was chosen so that
 Causeway stays compatible with Ext4Fsd, the project it most directly replaces.
 
-WinFsp is used under its FLOSS exception. It is not distributed with Causeway: the DLL is
-located through the registry and loaded at run time, and no WinFsp source is included.
+WinFsp is used under its FLOSS exception, which permits linking with its DLL and distributing
+its unmodified installer. app/res holds the official, signed installer, unchanged, and the
+executable carries it for setup. The DLL is loaded at run time from where that installer puts it.
 
   WinFsp - Windows File System Proxy, Copyright (C) Bill Zissimopoulos
   https://github.com/winfsp/winfsp
