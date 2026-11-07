@@ -1,0 +1,74 @@
+#![cfg(unix)]
+//! Reads and edits images made by the real kernel (see `ci/kernel-check.sh`): compressed
+//! extents in every codec, and snapshots with genuinely shared trees.
+use btrfs::Btrfs;
+use fscore::testkit::*;
+use fscore::{BlockDev, FileDev, Filesystem, MountOpts};
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::Arc;
+
+fn dir() -> Option<PathBuf> {
+    std::env::var("CAUSEWAY_OUT").ok().map(PathBuf::from)
+}
+
+fn open(p: &Path, write: bool) -> Btrfs {
+    let d: Arc<dyn BlockDev> = Arc::new(FileDev::open(p, write).unwrap());
+    Btrfs::open(vec![d], MountOpts { write, cache_bytes: 0 }).unwrap()
+}
+
+#[test]
+fn reads_every_codec() {
+    let Some(out) = dir() else { return };
+    for codec in ["zlib", "lzo", "zstd"] {
+        let img = out.join(format!("kernel-{codec}.image"));
+        if !img.exists() {
+            continue;
+        }
+        let want = host_tree(&out.join(format!("kernel-{codec}.src")));
+        let fs = open(&img, false);
+        assert!(fs.info().features.iter().any(|f| !f.is_empty()));
+        assert_same(&walk(&fs).unwrap(), &want, codec);
+    }
+}
+
+#[test]
+fn edits_kernel_snapshots() {
+    let Some(out) = dir() else { return };
+    let img = out.join("kernel-snap.image");
+    if !img.exists() {
+        return;
+    }
+    let want = host_tree(&out.join("kernel-snap.src"));
+    let fs = open(&img, true);
+    assert!(!fs.info().read_only, "{:?}", fs.info().ro_reasons);
+    let live = fs.root();
+    let snap = fs.lookup(live, b"snap").unwrap();
+    let mut rng = Rng(3);
+    for i in 0..3000 {
+        let n = format!("f{:04}", rng.below(4000));
+        let (dir, other) = if i % 2 == 0 { (live, snap) } else { (snap, live) };
+        if let Ok(ino) = fs.lookup(dir, n.as_bytes()) {
+            let _ = fs.write(ino, rng.below(8192), &[i as u8; 300]);
+            if i % 7 == 0 {
+                fs.unlink(other, n.as_bytes()).ok();
+            }
+        }
+        if i % 500 == 0 {
+            fs.sync().unwrap();
+        }
+    }
+    fs.unmount().unwrap();
+    drop(fs);
+    let o = Command::new("btrfs").args(["check", "--check-data-csum"]).arg(&img).output().unwrap();
+    assert!(o.status.success(), "{}\n{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
+    let fs = open(&img, false);
+    let frozen = fs.lookup(fs.root(), b"frozen").unwrap();
+    let mut seen = 0;
+    fs.read_dir(frozen, 0, &mut |_, _| {
+        seen += 1;
+        true
+    })
+    .unwrap();
+    assert_eq!(seen, want.keys().filter(|k| k.matches('/').count() == 1).count());
+}

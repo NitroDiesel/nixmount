@@ -14,6 +14,8 @@ pub enum FsError {
     ReadOnly,
     NameTooLong,
     TooManyLinks,
+    /// Rename or link across subvolumes; callers fall back to copying.
+    CrossDevice,
     Invalid(&'static str),
     /// On-disk data failed validation; the operation stops instead of guessing.
     Corrupt(String),
@@ -33,6 +35,7 @@ impl fmt::Display for FsError {
             FsError::ReadOnly => f.write_str("volume is read-only"),
             FsError::NameTooLong => f.write_str("name too long"),
             FsError::TooManyLinks => f.write_str("too many links"),
+            FsError::CrossDevice => f.write_str("not on the same subvolume"),
             FsError::Invalid(s) => write!(f, "invalid request: {s}"),
             FsError::Corrupt(s) => write!(f, "corrupt filesystem: {s}"),
             FsError::Unsupported(s) => write!(f, "unsupported: {s}"),

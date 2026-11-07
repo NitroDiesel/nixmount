@@ -28,3 +28,35 @@ sync
 sudo cp "$img" "$out/dirty.img"
 sudo umount "$mnt"
 sudo chown "$(id -u)" "$out/dirty.img"
+
+# Compressed extents written by the kernel, in every codec.
+for codec in zlib lzo zstd; do
+  img="$out/kernel-$codec.image"
+  src="$out/kernel-$codec.src"
+  truncate -s 512M "$img"
+  mkfs.btrfs -q -f "$img"
+  mkdir -p "$src/sub"
+  yes "the quick brown fox jumps over the lazy dog" | head -c 3000000 > "$src/text.txt"
+  head -c 2000000 /dev/urandom > "$src/random.bin"
+  { head -c 200000 /dev/urandom; yes abcdefgh | head -c 200000; } > "$src/sub/mixed.bin"
+  echo tiny > "$src/tiny.txt"
+  sudo mount -o "loop,compress-force=$codec" "$img" "$mnt"
+  sudo cp -r "$src/." "$mnt/"
+  sync
+  sudo umount "$mnt"
+done
+
+# Snapshots with real shared trees, deep enough that interior nodes are shared.
+img="$out/kernel-snap.image"
+src="$out/kernel-snap.src"
+truncate -s 1G "$img"
+mkfs.btrfs -q -f "$img"
+mkdir -p "$src"
+for i in $(seq 0 3999); do printf -v n 'f%04d' "$i"; echo "content $i" > "$src/$n"; done
+sudo mount -o loop "$img" "$mnt"
+sudo cp -r "$src/." "$mnt/"
+sudo btrfs subvolume snapshot "$mnt" "$mnt/snap" > /dev/null
+sudo btrfs subvolume snapshot -r "$mnt" "$mnt/frozen" > /dev/null
+sync
+sudo umount "$mnt"
+sudo chown "$(id -u)" "$out"/kernel-*.image

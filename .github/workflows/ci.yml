@@ -18,16 +18,18 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y e2fsprogs btrfs-progs
       - run: mke2fs -V; btrfs --version; uname -r
       - name: Engines vs e2fsck / btrfs check
-        run: cargo test --profile ci-test -p ext4 -p fscore -- --nocapture --test-threads=4
+        run: cargo test --profile ci-test -p ext4 -p btrfs -p fscore -- --nocapture --test-threads=4
       - name: Linux kernel reads what the engines wrote
         run: bash ci/kernel-check.sh "$CAUSEWAY_OUT"
-      - name: Replay a journal the kernel left dirty
-        run: cargo test --profile ci-test -p ext4 --test dirty -- --nocapture
+      - name: Kernel-made images: dirty journals, compression, shared snapshots
+        run: |
+          cargo test --profile ci-test -p ext4 --test dirty -- --nocapture
+          cargo test --profile ci-test -p btrfs --test kernel -- --nocapture
       - name: Publish fixture images
         if: always()
         run: |
           mkdir -p fixtures
-          for f in ext4-default ext4-1k-nocsum ext3-1k ext2-2k ext4-inline; do
+          for f in ext4-default ext4-1k-nocsum ext3-1k ext2-2k ext4-inline btrfs-default btrfs-n4k btrfs-legacy; do
             [ -f "$CAUSEWAY_OUT/$f.img" ] && gzip -9c "$CAUSEWAY_OUT/$f.img" > "fixtures/$f.img.gz"
           done
           ls -la fixtures

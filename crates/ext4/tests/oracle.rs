@@ -222,7 +222,7 @@ fn power_loss() {
         let mut rng = Rng(77);
         let mut synced: Vec<(usize, Tree)> = vec![];
         for _ in 0..12 {
-            random_ops(&fs, &mut model, &mut rng, 60, 40_000);
+            random_ops_no_sync(&fs, &mut model, &mut rng, 60, 40_000);
             fs.sync().unwrap();
             synced.push((dev.events(), model.tree()));
         }

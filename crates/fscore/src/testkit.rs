@@ -235,14 +235,23 @@ fn parent_of(fs: &dyn Filesystem, path: &str) -> Result<(Ino, Vec<u8>)> {
 /// Applies `ops` random operations to both the volume and the model. Volume-full errors
 /// are legal and leave the model untouched; any other error fails the test.
 pub fn random_ops(fs: &dyn Filesystem, m: &mut Model, r: &mut Rng, ops: usize, max_write: usize) {
+    run_ops(fs, m, r, ops, max_write, true)
+}
+
+/// Like [`random_ops`] without sync calls, so commits happen only where the caller says.
+pub fn random_ops_no_sync(fs: &dyn Filesystem, m: &mut Model, r: &mut Rng, ops: usize, max_write: usize) {
+    run_ops(fs, m, r, ops, max_write, false)
+}
+
+fn run_ops(fs: &dyn Filesystem, m: &mut Model, r: &mut Rng, ops: usize, max_write: usize, sync: bool) {
     for i in 0..ops {
-        if let Err(e) = step(fs, m, r, max_write) {
+        if let Err(e) = step(fs, m, r, max_write, sync) {
             panic!("op {i} failed: {e}");
         }
     }
 }
 
-fn step(fs: &dyn Filesystem, m: &mut Model, r: &mut Rng, max_write: usize) -> Result<()> {
+fn step(fs: &dyn Filesystem, m: &mut Model, r: &mut Rng, max_write: usize, sync: bool) -> Result<()> {
     let tolerate = |res: Result<()>| match res {
         Err(FsError::NoSpace) => Ok(false),
         Err(e) => Err(e),
@@ -372,7 +381,8 @@ fn step(fs: &dyn Filesystem, m: &mut Model, r: &mut Rng, max_write: usize) -> Re
                 m.nodes.insert(path, Node::Link(target));
             }
         }
-        _ => fs.sync()?,
+        _ if sync => fs.sync()?,
+        _ => {}
     }
     Ok(())
 }
