@@ -28,14 +28,24 @@ truncate -s 128M "$out/btrfs-default.img"
 mkfs.btrfs -q -f --rootdir "$src" "$out/btrfs-default.img"
 gzip -9f "$out/btrfs-default.img"
 
-# Encrypted the way installers do it: LUKS2 holding Btrfs. The passphrase is "nixmount", and
-# small key-derivation costs and a small header keep the fixture quick and compact.
+# Encrypted the way installers do it: LUKS2 holding Btrfs. The passphrase is "nixmount".
+# Every block written through encryption becomes incompressible, so the filesystem is built
+# small in a plain file first and only its used blocks are copied in.
+small=$(mktemp -d)
+mkdir -p "$small/docs"
+echo "hello from linux" > "$small/hello.txt"
+echo "nested" > "$small/docs/nested.txt"
+ln -s hello.txt "$small/link"
+plain=$(mktemp)
+truncate -s 120M "$plain"
+mkfs.btrfs -q -f -n 4096 -m single --rootdir "$small" "$plain"
 img="$out/luks2-btrfs.img"
 truncate -s 128M "$img"
 printf '%s' nixmount | sudo cryptsetup luksFormat --batch-mode --key-file=- --type luks2 --pbkdf argon2id \
   --pbkdf-memory 65536 --pbkdf-force-iterations 4 --luks2-metadata-size 16k --luks2-keyslots-size 256k "$img"
 printf 'nixmount\n' | sudo cryptsetup open "$img" nm-fixture
-sudo mkfs.btrfs -q -f --rootdir "$src" /dev/mapper/nm-fixture
+sudo dd if="$plain" of=/dev/mapper/nm-fixture bs=4096 conv=sparse,notrunc status=none
 sudo cryptsetup close nm-fixture
+rm "$plain"
 gzip -9f "$img"
 ls -la "$out"
