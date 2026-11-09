@@ -180,6 +180,11 @@ impl Canvas {
         unsafe { std::slice::from_raw_parts_mut(self.bits, (self.w * self.h) as usize) }
     }
 
+    /// The GDI font behind `f`, for native controls that must match painted text.
+    pub fn hfont(&self, f: Font) -> HFONT {
+        self.fonts[FONTS.iter().position(|x| *x == f).unwrap_or(1)]
+    }
+
     pub fn px(&self, v: f32) -> i32 {
         (v * self.scale).round() as i32
     }

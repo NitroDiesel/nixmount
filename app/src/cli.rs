@@ -1,5 +1,5 @@
 //! The command line: everything the interface does, for scripts.
-use crate::ipc::{self, Request, Response};
+use crate::ipc::{self, Request, Response, Secret};
 use crate::mounts::MountRequest;
 use crate::volumes::{self, Target, Volume};
 use crate::winfsp::{HostOptions, Mount};
@@ -7,6 +7,7 @@ use fscore::{resolve, FileKind, Filesystem, MountOpts};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use zeroize::Zeroizing;
 
 const USAGE: &str = "\
 NixMount: mount ext2/3/4 and Btrfs volumes on Windows.
@@ -34,6 +35,7 @@ Usage:
   nixmount service run|debug      Run the service (debug: in this console)
 
 A target is an image file (optionally file#partition) or disk:partition, e.g. 1:3.
+Encrypted (LUKS) volumes ask for their passphrase, or take the first line of piped input.
 
 WinFsp - Windows File System Proxy, Copyright (C) Bill Zissimopoulos
 https://github.com/winfsp/winfsp";
@@ -96,13 +98,61 @@ fn take_value(args: &mut Vec<String>, flag: &str) -> Option<String> {
     v
 }
 
+/// Reads a passphrase: typed without echo at a console, or the first line of piped input,
+/// as cryptsetup does.
+fn read_passphrase(prompt: &str) -> Result<Zeroizing<String>, String> {
+    use windows_sys::Win32::System::Console::{GetConsoleMode, GetStdHandle, SetConsoleMode, ENABLE_ECHO_INPUT, STD_INPUT_HANDLE};
+    // SAFETY: the mode is an out-parameter valid for the call.
+    let (h, mut mode) = (unsafe { GetStdHandle(STD_INPUT_HANDLE) }, 0);
+    let console = !h.is_null() && unsafe { GetConsoleMode(h, &mut mode) } != 0;
+    if console {
+        eprint!("{prompt}");
+        // SAFETY: `h` is this process's console input.
+        unsafe { SetConsoleMode(h, mode & !ENABLE_ECHO_INPUT) };
+    }
+    let mut line = Zeroizing::new(String::new());
+    let r = std::io::stdin().read_line(&mut line);
+    if console {
+        // SAFETY: as above, restoring what was there.
+        unsafe { SetConsoleMode(h, mode) };
+        eprintln!();
+    }
+    r.map_err(|e| e.to_string())?;
+    while line.ends_with(['\r', '\n']) {
+        line.pop();
+    }
+    Ok(line)
+}
+
+/// The key of an encrypted volume, unlocked with a passphrase; None for one that isn't.
+fn key_for(target: &Target, name: &str) -> Result<Option<luks::Key>, String> {
+    if volumes::luks_header(target).is_none() {
+        return Ok(None);
+    }
+    let pass = read_passphrase(&format!("Passphrase for {name}: "))?;
+    if pass.is_empty() {
+        return Err("this volume is encrypted, and no passphrase was given".into());
+    }
+    eprintln!("Unlocking…");
+    volumes::unlock(target, pass.as_bytes()).map(Some).map_err(|e| match e {
+        fscore::FsError::Unsupported(s) => s,
+        e => e.to_string(),
+    })
+}
+
 fn open_for_reading(t: &str) -> Result<Arc<dyn Filesystem>, String> {
-    volumes::open(&parse_target(t), MountOpts::default()).map_err(|e| e.to_string())
+    let target = parse_target(t);
+    let key = key_for(&target, t)?;
+    volumes::open_unlocked(&target, MountOpts::default(), key.as_ref()).map_err(|e| e.to_string())
 }
 
 fn cmd_info(target: &str) -> Result<(), String> {
+    let encryption = volumes::luks_header(&parse_target(target)).map(|h| format!("LUKS{}, {}", h.version, h.summary().join(", ")));
     let fs = open_for_reading(target)?;
     let i = fs.info();
+    if let Some(e) = encryption {
+        println!("Encryption: {e}");
+    }
     println!("Type:       {}", i.fs_type);
     println!("Label:      {}", i.label);
     println!("UUID:       {}", i.uuid);
@@ -186,17 +236,16 @@ fn export(fs: &dyn Filesystem, ino: fscore::Ino, dest: &Path, depth: u32, count:
     Ok(())
 }
 
-pub fn export_path(target: &Target, path: &str, dest: &Path) -> Result<u64, String> {
-    let fs = volumes::open(target, MountOpts::default()).map_err(|e| e.to_string())?;
-    let ino = resolve(fs.as_ref(), path).map_err(|e| e.to_string())?;
+pub fn export_path(fs: &dyn Filesystem, path: &str, dest: &Path) -> Result<u64, String> {
+    let ino = resolve(fs, path).map_err(|e| e.to_string())?;
     let mut count = 0;
-    export(fs.as_ref(), ino, dest, 0, &mut count)?;
+    export(fs, ino, dest, 0, &mut count)?;
     Ok(count)
 }
 
-fn foreground(req: MountRequest) -> Result<(), String> {
+fn foreground(req: MountRequest, key: Option<luks::Key>) -> Result<(), String> {
     let opts = MountOpts { write: req.write, cache_bytes: 0 };
-    let fs = volumes::open(&req.target, opts).map_err(|e| e.to_string())?;
+    let fs = volumes::open_unlocked(&req.target, opts, key.as_ref()).map_err(|e| e.to_string())?;
     let info = fs.info();
     let host = HostOptions {
         read_only: !req.write,
@@ -257,7 +306,8 @@ pub fn run(mut args: Vec<String>) -> Result<(), String> {
         "info" => cmd_info(&arg(0)?)?,
         "ls" => cmd_ls(&arg(0)?, args.get(1).map_or("/", String::as_str))?,
         "export" => {
-            let n = export_path(&parse_target(&arg(0)?), &arg(1)?, &PathBuf::from(arg(2)?))?;
+            let fs = open_for_reading(&arg(0)?)?;
+            let n = export_path(fs.as_ref(), &arg(1)?, &PathBuf::from(arg(2)?))?;
             println!("Exported {n} files.");
         }
         "mount" => {
@@ -267,7 +317,9 @@ pub fn run(mut args: Vec<String>) -> Result<(), String> {
             let codepage = take_value(&mut args, "--codepage").and_then(|v| v.parse().ok()).unwrap_or(0);
             let uid = take_value(&mut args, "--uid").and_then(|v| v.parse().ok());
             let gid = take_value(&mut args, "--gid").and_then(|v| v.parse().ok());
-            let target = parse_target(&args.first().cloned().ok_or(USAGE)?);
+            let name = args.first().cloned().ok_or(USAGE)?;
+            let target = parse_target(&name);
+            let key = key_for(&target, &name)?;
             let req = MountRequest {
                 target,
                 mount_point: args.get(1).cloned().unwrap_or_default(),
@@ -278,9 +330,9 @@ pub fn run(mut args: Vec<String>) -> Result<(), String> {
                 gid,
             };
             if fg {
-                return foreground(req);
+                return foreground(req, key);
             }
-            if let Response::Mounted(m) = call(&Request::Mount(req))? {
+            if let Response::Mounted(m) = call(&Request::Mount { mount: req, key: key.as_ref().map(Secret::new) })? {
                 println!("Mounted at {} ({})", m.mount_point, if m.read_only { "read-only" } else { "read-write" });
                 for r in m.ro_reasons.iter().chain(&m.notes) {
                     println!("  {r}");
@@ -294,6 +346,9 @@ pub fn run(mut args: Vec<String>) -> Result<(), String> {
         "automount" => {
             let write = take_flag(&mut args, "--rw");
             let (mode, target) = (args.first().cloned().ok_or(USAGE)?, args.get(1).cloned().ok_or(USAGE)?);
+            if volumes::luks_header(&parse_target(&target)).is_some() {
+                return Err(crate::service::NO_AUTO_ENCRYPTED.into());
+            }
             let uuid = open_for_reading(&target)?.info().uuid;
             let mount = (mode == "on").then(|| MountRequest {
                 target: parse_target(&target),

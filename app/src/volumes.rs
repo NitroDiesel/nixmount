@@ -37,7 +37,15 @@ pub struct Volume {
     pub notes: Vec<String>,
     /// Why it can't be opened at all, if so.
     pub error: Option<String>,
+    /// LUKS-encrypted.
+    #[serde(default)]
+    pub encrypted: bool,
+    /// Encrypted and not unlocked yet, so all that is known comes from the LUKS header.
+    #[serde(default)]
+    pub locked: bool,
 }
+
+pub const LOCKED: &str = "this volume is encrypted, so it needs its passphrase";
 
 /// Opens every device of `target`.
 fn devices(target: &Target, write: bool) -> Result<Vec<Arc<dyn BlockDev>>> {
@@ -57,28 +65,62 @@ fn devices(target: &Target, write: bool) -> Result<Vec<Arc<dyn BlockDev>>> {
 /// A whole image, or the slice of it holding one partition. With no partition given, the
 /// first one holding a mountable filesystem is chosen.
 fn image_slice(file: Arc<dyn BlockDev>, partition: Option<u32>) -> Result<Arc<dyn BlockDev>> {
-    if partition.is_none() && part::probe(file.as_ref()).mountable() {
+    let usable = |d: &dyn BlockDev| {
+        let k = part::probe(d);
+        k.mountable() || k == FsKind::Luks
+    };
+    if partition.is_none() && usable(file.as_ref()) {
         return Ok(file);
     }
     for p in part::partitions(file.as_ref(), 512)? {
         let s: Arc<dyn BlockDev> = Arc::new(SliceDev::new(file.clone(), p.start, p.len));
         let wanted = partition.is_none_or(|n| n == p.index);
-        if wanted && part::probe(s.as_ref()).mountable() {
+        if wanted && usable(s.as_ref()) {
             return Ok(s);
         }
     }
     Err(FsError::Unsupported("no ext or btrfs filesystem found".into()))
 }
 
+/// The encryption header, if `target` is a LUKS volume. Reading it needs no passphrase.
+pub fn luks_header(target: &Target) -> Option<luks::Header> {
+    let devs = devices(target, false).ok()?;
+    let first = devs.first()?;
+    (part::probe(first.as_ref()) == FsKind::Luks).then(|| luks::read_header(first.as_ref()).ok())?
+}
+
+/// Recovers the key of an encrypted volume from its passphrase.
+pub fn unlock(target: &Target, passphrase: &[u8]) -> Result<luks::Key> {
+    let devs = devices(target, false)?;
+    let first = devs.first().ok_or(FsError::Invalid("no devices"))?;
+    luks::read_header(first.as_ref())?.unlock(first.as_ref(), passphrase)
+}
+
 /// Opens a volume with the engine its signature calls for. Devices are opened read-only
 /// unless writing was requested, so a read-only mount cannot write even by accident.
 pub fn open(target: &Target, opts: MountOpts) -> Result<Arc<dyn Filesystem>> {
-    open_with_devices(target, opts).map(|(fs, _)| fs)
+    open_with_devices(target, opts, None).map(|(fs, _)| fs)
 }
 
-/// Also hands back the devices, so a mount can tell when they stop answering.
-pub fn open_with_devices(target: &Target, opts: MountOpts) -> Result<(Arc<dyn Filesystem>, Vec<Arc<dyn BlockDev>>)> {
-    let devs = devices(target, opts.write)?;
+pub fn open_unlocked(target: &Target, opts: MountOpts, key: Option<&luks::Key>) -> Result<Arc<dyn Filesystem>> {
+    open_with_devices(target, opts, key).map(|(fs, _)| fs)
+}
+
+/// Also hands back the devices, so a mount can tell when they stop answering. LUKS devices
+/// are decrypted with `key` on the way.
+pub fn open_with_devices(
+    target: &Target,
+    opts: MountOpts,
+    key: Option<&luks::Key>,
+) -> Result<(Arc<dyn Filesystem>, Vec<Arc<dyn BlockDev>>)> {
+    let mut devs = devices(target, opts.write)?;
+    for d in &mut devs {
+        if part::probe(d.as_ref()) == FsKind::Luks {
+            let key = key.ok_or_else(|| FsError::Unsupported(LOCKED.into()))?;
+            let header = luks::read_header(d.as_ref())?;
+            *d = Arc::new(header.open(d.clone(), key)?);
+        }
+    }
     let Some(first) = devs.first() else { return Err(FsError::Invalid("no devices")) };
     let fs: Arc<dyn Filesystem> = match part::probe(first.as_ref()) {
         FsKind::Ext(_) => Arc::new(Ext4::open(first.clone(), opts)?),
@@ -89,10 +131,29 @@ pub fn open_with_devices(target: &Target, opts: MountOpts) -> Result<(Arc<dyn Fi
 }
 
 fn enrich(v: &mut Volume) {
+    if let Some(h) = luks_header(&v.target) {
+        v.encrypted = true;
+        v.locked = true;
+        v.kind = format!("LUKS{}", h.version);
+        v.label = h.label.clone();
+        v.uuid = h.uuid.clone();
+        v.features = h.summary();
+        return;
+    }
     match open(&v.target, MountOpts { write: false, cache_bytes: 1 << 20 }) {
         Ok(fs) => fill_from(v, &fs.info()),
         Err(e) => v.error = Some(e.to_string()),
     }
+}
+
+/// What an unlocked volume holds, for the list.
+pub fn describe_unlocked(v: &Volume, key: &luks::Key) -> Result<Volume> {
+    let fs = open_unlocked(&v.target, MountOpts { write: false, cache_bytes: 1 << 20 }, Some(key))?;
+    let mut out = v.clone();
+    fill_from(&mut out, &fs.info());
+    out.error = None;
+    out.locked = false;
+    Ok(out)
 }
 
 /// What write access would meet: the same checks as a real mount, without mounting.
@@ -141,7 +202,7 @@ pub fn scan_disks() -> Vec<Volume> {
             location: p.disk_name.clone(),
             size: p.size,
             kind: p.kind.name(),
-            mountable: p.kind.mountable(),
+            mountable: p.kind.mountable() || p.kind == FsKind::Luks,
             label: String::new(),
             uuid: String::new(),
             removable: p.removable,
@@ -150,6 +211,8 @@ pub fn scan_disks() -> Vec<Volume> {
             ro_reasons: vec![],
             notes: vec![],
             error: None,
+            encrypted: false,
+        locked: false,
         };
         if !v.mountable {
             v.error = Some(format!("{} volumes aren't supported", v.kind));
@@ -187,6 +250,8 @@ pub fn describe_image(path: &Path) -> Volume {
         ro_reasons: vec![],
         notes: vec![],
         error: None,
+        encrypted: false,
+        locked: false,
     };
     enrich(&mut v);
     if v.error.is_some() {
@@ -196,7 +261,7 @@ pub fn describe_image(path: &Path) -> Volume {
 }
 
 /// A list entry for a volume that is open, built from the engine's own view of it.
-pub fn describe_mounted(target: &Target, info: &VolumeInfo) -> Volume {
+pub fn describe_mounted(target: &Target, info: &VolumeInfo, encrypted: bool) -> Volume {
     let (title, location) = match target {
         Target::Partition { disk, part } => (format!("Disk {disk} · Partition {part}"), "Mounted partition".to_string()),
         Target::Group { members } => (format!("{} devices", members.len()), "Multi-device".to_string()),
@@ -220,6 +285,8 @@ pub fn describe_mounted(target: &Target, info: &VolumeInfo) -> Volume {
         ro_reasons: vec![],
         notes: vec![],
         error: None,
+        encrypted,
+        locked: false,
     };
     fill_from(&mut v, info);
     v

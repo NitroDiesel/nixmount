@@ -122,6 +122,32 @@ Check 'read-only mount refuses writes' $blocked
 NixMount unmount 'M:'
 Check 'read-only mount left the image untouched' ($before -eq (Get-FileHash $img).Hash)
 
+# An encrypted volume made by cryptsetup, unlocked with a passphrase piped in as a script would.
+if (Test-Path 'tests/fixtures/luks2-btrfs.img.gz') {
+    $img = Expand-Fixture 'luks2-btrfs'
+    $ErrorActionPreference = 'Continue'
+    $said = 'not the passphrase' | & $Exe mount $img 'N:' 2>&1 | Out-String
+    $code = $LASTEXITCODE
+    $ErrorActionPreference = 'Stop'
+    Check 'a wrong passphrase is refused' (($code -ne 0) -and ($said -match "doesn't unlock") -and -not (Test-Path 'N:\'))
+    $ErrorActionPreference = 'Continue'
+    $said = 'nixmount' | & $Exe automount on $img 2>&1 | Out-String
+    $code = $LASTEXITCODE
+    $ErrorActionPreference = 'Stop'
+    Check 'an encrypted volume is never remembered for automounting' (($code -ne 0) -and ($said -match 'never stores'))
+    'nixmount' | & $Exe mount $img 'N:' --rw 2>&1 | Out-Host
+    Check 'the right passphrase mounts it' ($LASTEXITCODE -eq 0)
+    Check 'files come out decrypted' ((Get-Content 'N:\hello.txt') -eq 'hello from linux')
+    Set-Content 'N:\e2e-luks.txt' 'written through LUKS'
+    Copy-Item "$env:WINDIR\notepad.exe" 'N:\copy.exe'
+    Check 'a copy into an encrypted volume is byte-exact' ((Get-FileHash "$env:WINDIR\notepad.exe").Hash -eq (Get-FileHash 'N:\copy.exe').Hash)
+    NixMount scrub 'N:'
+    NixMount unmount 'N:'
+    $raw = [Text.Encoding]::ASCII.GetString([IO.File]::ReadAllBytes($img))
+    Check 'nothing reaches the disk unencrypted' (-not $raw.Contains('written through LUKS') -and -not $raw.Contains('hello from linux'))
+    Remove-Variable raw
+}
+
 # Raw partition access, the real-disk path, on a virtual disk so nothing real is touched.
 # A fixed VHD is a plain disk image, so the filesystem can be placed with ordinary file I/O.
 $vhd = "$Out\disk.vhd"

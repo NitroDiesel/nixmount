@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::ffi::c_void;
 use std::path::PathBuf;
 use std::ptr::{null, null_mut};
+use zeroize::Zeroize;
 use windows_sys::Win32::Foundation::{CloseHandle, LocalFree, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::Security::Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW;
 use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
@@ -23,12 +24,40 @@ const PIPE: &str = r"\\.\pipe\nixmount";
 /// Requests are small; refusing anything large caps what a client can make us allocate.
 const MAX_MESSAGE: usize = 4 << 20;
 
+/// Key material in a message. It is wiped when dropped and never printed.
+#[derive(Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Secret(Vec<u8>);
+
+impl Secret {
+    pub fn new(key: &luks::Key) -> Secret {
+        Secret(key.as_bytes().to_vec())
+    }
+
+    pub fn into_key(mut self) -> luks::Key {
+        luks::Key::from_bytes(std::mem::take(&mut self.0))
+    }
+}
+
+impl Drop for Secret {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
+}
+
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("Secret(..)")
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Request {
     Status,
     Scan,
     Inspect { path: PathBuf },
-    Mount(MountRequest),
+    /// `key` unlocks an encrypted volume. The passphrase itself never reaches the service.
+    Mount { mount: MountRequest, key: Option<Secret> },
     Unmount { point: String },
     Sync,
     Scrub { point: String },
@@ -103,10 +132,12 @@ impl Pipe {
         Ok(())
     }
 
+    /// Messages can carry a volume key, so their encoded form is wiped once used.
     pub fn send<T: Serialize>(&self, msg: &T) -> std::io::Result<()> {
-        let body = serde_json::to_vec(msg)?;
-        self.write_all(&(body.len() as u32).to_le_bytes())?;
-        self.write_all(&body)
+        let mut body = serde_json::to_vec(msg)?;
+        let r = self.write_all(&(body.len() as u32).to_le_bytes()).and_then(|()| self.write_all(&body));
+        body.zeroize();
+        r
     }
 
     pub fn receive<T: for<'a> Deserialize<'a>>(&self) -> std::io::Result<T> {
@@ -117,8 +148,9 @@ impl Pipe {
             return Err(std::io::ErrorKind::InvalidData.into());
         }
         let mut body = vec![0u8; n];
-        self.read_exact(&mut body)?;
-        Ok(serde_json::from_slice(&body)?)
+        let r = self.read_exact(&mut body).and_then(|()| Ok(serde_json::from_slice(&body)?));
+        body.zeroize();
+        r
     }
 }
 

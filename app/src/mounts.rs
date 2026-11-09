@@ -45,6 +45,7 @@ struct Entry {
     devs: Vec<Arc<dyn BlockDev>>,
     mount: Mount,
     stats: Arc<Stats>,
+    encrypted: bool,
 }
 
 #[derive(Default)]
@@ -64,7 +65,8 @@ impl Mounts {
         self.list.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    pub fn mount(&self, r: MountRequest) -> Result<MountStatus, String> {
+    /// Mounts `r`. An encrypted volume needs `key`, which lives in the mount until unmount.
+    pub fn mount(&self, r: MountRequest, key: Option<luks::Key>) -> Result<MountStatus, String> {
         if self.lock().iter().any(|e| e.target == r.target) {
             return Err("this volume is already mounted".into());
         }
@@ -74,7 +76,7 @@ impl Mounts {
             r.mount_point.clone()
         };
         let opts = MountOpts { write: r.write, cache_bytes: 0 };
-        let (fs, devs) = volumes::open_with_devices(&r.target, opts).map_err(|e| e.to_string())?;
+        let (fs, devs) = volumes::open_with_devices(&r.target, opts, key.as_ref()).map_err(|e| e.to_string())?;
         let host = HostOptions {
             read_only: !r.write,
             hide_dotfiles: r.hide_dotfiles,
@@ -85,7 +87,7 @@ impl Mounts {
         };
         let mount = Mount::start(fs.clone(), &point, host)?;
         let stats = mount.stats.clone();
-        let e = Entry { target: r.target, fs, devs, mount, stats };
+        let e = Entry { target: r.target, fs, devs, mount, stats, encrypted: key.is_some() };
         let status = status_of(&e);
         self.lock().push(e);
         Ok(status)
@@ -128,7 +130,7 @@ impl Mounts {
 
     /// Describes mounted volumes for the volume list.
     pub fn volumes(&self) -> Vec<Volume> {
-        self.lock().iter().map(|e| volumes::describe_mounted(&e.target, &e.fs.info())).collect()
+        self.lock().iter().map(|e| volumes::describe_mounted(&e.target, &e.fs.info(), e.encrypted)).collect()
     }
 
     pub fn status(&self) -> Vec<MountStatus> {

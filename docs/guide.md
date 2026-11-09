@@ -34,6 +34,21 @@ To mount a disk image, select **Add image**. Images with a partition table work 
 it is plugged in. If you unmount it yourself, it stays unmounted until you unplug it or restart
 Windows.
 
+## Encrypted volumes
+
+Volumes encrypted with LUKS, which Linux installers use for full-disk encryption, show a lock in
+the list. Select one, type the passphrase you use when Linux starts, and select **Unlock**. It
+then mounts and browses like any other volume. **Lock** forgets the key, and so does closing the
+window. A mounted volume keeps its key until it is unmounted.
+
+Unlocking takes a few seconds: LUKS makes each passphrase guess deliberately slow. The
+passphrase is only used to unlock and is never saved, which is also why encrypted volumes can't
+mount automatically. Type the same characters you type at Linux's prompt. If Linux uses a
+different keyboard layout, a key may produce another character on Windows.
+
+From the command line, commands that open an encrypted volume ask for its passphrase, or read
+the first line of piped input.
+
 ## Write to a volume
 
 Volumes mount read-only unless **Allow writing** is on. A read-only mount can't change the disk
@@ -127,6 +142,11 @@ using the disk, such as a disk tool, a virtual machine or WSL.
 writable, was not shut down cleanly in a way that can't be recovered here, or has recorded
 errors. The window lists the reason. Most clear after mounting it once in Linux or running
 `e2fsck`.
+
+**An encrypted volume won't unlock with the right passphrase.** If Linux unlocks it with a TPM
+or security key alone, it may have no passphrase at all. Add one in Linux with
+`cryptsetup luksAddKey`. See [Compatibility](compatibility.md#luks-encryption) for what else
+can stand in the way.
 
 **The service won't start.** Run setup again to repair it, or run
 `nixmount service debug` from an elevated prompt to watch it run.

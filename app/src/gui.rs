@@ -2,13 +2,14 @@
 //! state on demand; nothing animates, so an idle window uses no CPU at all.
 use crate::canvas::{rgb, Canvas, Color, Font, Rect};
 use crate::cli;
-use crate::ipc::{self, Request, Response, ScrubState};
+use crate::ipc::{self, Request, Response, ScrubState, Secret};
 use crate::mounts::{MountRequest, MountStatus};
 use crate::volumes::{self, Target, Volume};
 use fscore::{resolve, DirEntry, FileKind, Filesystem, MountOpts};
 use std::path::PathBuf;
 use std::ptr::{null, null_mut};
 use std::sync::Arc;
+use zeroize::Zeroizing;
 use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::Graphics::Dwm::*;
 use windows_sys::Win32::Graphics::Gdi::*;
@@ -23,6 +24,9 @@ use windows_sys::Win32::UI::Shell::*;
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 const WM_WORKER: u32 = WM_APP + 1;
+/// Enter in the passphrase field.
+const WM_UNLOCK: u32 = WM_APP + 2;
+const ID_PASS: usize = 100;
 const TIMER_STATUS: usize = 1;
 const TIMER_POLL: usize = 2;
 const WM_MOUSELEAVE: u32 = 0x02A3;
@@ -40,6 +44,7 @@ const I_WARN: &str = "\u{E7BA}";
 const I_CLOSE: &str = "\u{E711}";
 const I_INFO: &str = "\u{E946}";
 const I_CHEVRON: &str = "\u{E70D}";
+const I_LOCK: &str = "\u{E72E}";
 
 struct Theme {
     bg: Color,
@@ -114,6 +119,9 @@ enum Act {
     Install,
     WinFspHome,
     Dismiss,
+    FocusPass,
+    Unlock,
+    Lock,
 }
 
 struct Region {
@@ -153,6 +161,15 @@ enum Msg {
     Failed(String),
     Scrub(ScrubState),
     Browser(Box<Browser>),
+    Unlocked { key: luks::Key, volume: Box<Volume> },
+}
+
+/// An encrypted volume unlocked in this window. The key goes when it is locked again or the
+/// window closes, and is wiped as it goes.
+struct Unlocked {
+    key: luks::Key,
+    locked: Volume,
+    open: Volume,
 }
 
 /// Options the user has chosen for each volume, by list position.
@@ -185,6 +202,14 @@ struct App {
     side_max: usize,
     detail_scroll: i32,
     detail_max: i32,
+    unlocked: Vec<Unlocked>,
+    /// The native passphrase field, where it should be this frame, and where it is.
+    pass: HWND,
+    pass_rect: Option<Rect>,
+    pass_at: Option<Rect>,
+    pass_brush: Option<(Color, HBRUSH)>,
+    /// Put the cursor in the passphrase field once it is shown.
+    focus_pass: bool,
 }
 
 /// `Send` wrapper so workers can post back to the window.
@@ -203,6 +228,17 @@ impl Wnd {
             drop(unsafe { Box::from_raw(p) });
         }
     }
+}
+
+/// GDI wants colours as 0x00BBGGRR.
+fn colorref(c: Color) -> u32 {
+    (c & 0xFF) << 16 | (c & 0xFF00) | (c >> 16) & 0xFF
+}
+
+/// An engine message as a sentence for a banner.
+fn sentence(s: &str) -> String {
+    let mut c = s.chars();
+    c.next().map_or_else(String::new, |f| f.to_uppercase().chain(c).collect())
 }
 
 fn wide(s: &str) -> Vec<u16> {
@@ -295,6 +331,111 @@ impl App {
         self.mounts.iter().find(|m| m.target == v.target)
     }
 
+    fn key_of(&self, t: &Target) -> Option<luks::Key> {
+        self.unlocked.iter().find(|u| u.open.target == *t).map(|u| u.key.clone())
+    }
+
+    /// Takes what was typed in the passphrase field and clears the field.
+    fn take_passphrase(&self) -> Zeroizing<String> {
+        if self.pass.is_null() {
+            return Zeroizing::new(String::new());
+        }
+        // SAFETY: the field is alive, and the buffer is sized by the length passed.
+        unsafe {
+            let n = GetWindowTextLengthW(self.pass).max(0) as usize;
+            let mut buf = Zeroizing::new(vec![0u16; n + 1]);
+            let got = GetWindowTextW(self.pass, buf.as_mut_ptr(), buf.len() as i32).max(0) as usize;
+            SetWindowTextW(self.pass, [0u16].as_ptr());
+            Zeroizing::new(String::from_utf16_lossy(&buf[..got.min(n)]))
+        }
+    }
+
+    fn unlock(&mut self) {
+        let Some(v) = self.current().cloned().filter(|v| v.locked) else { return };
+        let pass = self.take_passphrase();
+        if pass.is_empty() {
+            self.banner = Some((true, "Type the volume's passphrase first".into()));
+            self.focus_pass = true;
+            return;
+        }
+        self.set_busy("Unlocking… this takes a few seconds");
+        let w = self.wnd();
+        std::thread::spawn(move || {
+            let r = volumes::unlock(&v.target, pass.as_bytes()).and_then(|key| Ok((volumes::describe_unlocked(&v, &key)?, key)));
+            match r {
+                Ok((open, key)) => w.post(Msg::Unlocked { key, volume: Box::new(open) }),
+                Err(fscore::FsError::Unsupported(s)) => w.post(Msg::Failed(sentence(&s))),
+                Err(e) => w.post(Msg::Failed(e.to_string())),
+            }
+        });
+    }
+
+    /// Forgets the key of the selected volume. A mount keeps its own until unmounted.
+    fn lock(&mut self) {
+        let Some(v) = self.current().cloned() else { return };
+        let Some(i) = self.unlocked.iter().position(|u| u.open.target == v.target) else { return };
+        let u = self.unlocked.remove(i);
+        if self.browser.as_ref().is_some_and(|b| b.target == v.target) {
+            self.browser = None;
+        }
+        self.volumes[self.selected] = u.locked;
+        self.banner = Some((false, "Locked. The passphrase is needed to open it again".into()));
+        self.focus_pass = true;
+    }
+
+    /// Shows the passphrase field where the last paint asked for it, or hides it.
+    fn place_pass(&mut self) {
+        if self.pass.is_null() {
+            return;
+        }
+        let want = self.pass_rect.filter(|_| self.browser.is_none());
+        // SAFETY: the field is a live child of this window.
+        unsafe {
+            if want != self.pass_at {
+                self.pass_at = want;
+                match want {
+                    Some(r) => {
+                        let h = self.canvas.px(20.0);
+                        let (x, w) = (r.x + self.canvas.px(12.0), r.w - self.canvas.px(24.0));
+                        SendMessageW(self.pass, WM_SETFONT, self.canvas.hfont(Font::Body) as WPARAM, 0);
+                        SetWindowPos(self.pass, null_mut(), x, r.y + (r.h - h) / 2, w, h, SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+                    }
+                    None => {
+                        // Nothing typed lingers in a field nobody can see.
+                        SetWindowTextW(self.pass, [0u16].as_ptr());
+                        if GetFocus() == self.pass {
+                            SetFocus(self.hwnd);
+                        }
+                        ShowWindow(self.pass, SW_HIDE);
+                    }
+                }
+            }
+            if self.focus_pass && want.is_some() && self.busy.is_none() {
+                self.focus_pass = false;
+                SetFocus(self.pass);
+            }
+        }
+    }
+
+    /// The background brush the passphrase field paints with, following the theme.
+    fn field_brush(&mut self) -> HBRUSH {
+        let bg = self.theme().bg;
+        match self.pass_brush {
+            Some((c, b)) if c == bg => b,
+            old => {
+                // SAFETY: the old brush is ours and no longer selected anywhere.
+                unsafe {
+                    if let Some((_, b)) = old {
+                        DeleteObject(b);
+                    }
+                    let b = CreateSolidBrush(colorref(bg));
+                    self.pass_brush = Some((bg, b));
+                    b
+                }
+            }
+        }
+    }
+
     fn set_busy(&mut self, s: &str) {
         self.busy = Some(s.to_string());
         self.banner = None;
@@ -371,7 +512,11 @@ impl App {
                 self.banner = None;
                 self.scrub = None;
                 self.detail_scroll = 0;
+                self.focus_pass = self.volumes.get(i).is_some_and(|v| v.locked);
             }
+            Act::FocusPass => self.focus_pass = true,
+            Act::Unlock => self.unlock(),
+            Act::Lock => self.lock(),
             Act::AddImage => self.add_image(),
             Act::Refresh => {
                 self.refresh_status();
@@ -458,7 +603,8 @@ impl App {
         {
             return;
         }
-        let req = Request::Mount(self.mount_request(&v, &c));
+        let key = self.key_of(&v.target);
+        let req = Request::Mount { mount: self.mount_request(&v, &c), key: key.as_ref().map(Secret::new) };
         self.request("Mounting…", req, None);
     }
 
@@ -532,9 +678,10 @@ impl App {
 
     fn open_browser(&mut self) {
         let Some(v) = self.current().cloned() else { return };
+        let key = self.key_of(&v.target);
         self.set_busy("Opening…");
         let w = self.wnd();
-        std::thread::spawn(move || match volumes::open(&v.target, MountOpts::default()) {
+        std::thread::spawn(move || match volumes::open_unlocked(&v.target, MountOpts::default(), key.as_ref()) {
             Ok(fs) => {
                 let mut b = Browser { fs: Some(fs), target: v.target, path: vec![], rows: vec![], scroll: 0, selected: None };
                 list_into(&mut b);
@@ -561,6 +708,7 @@ impl App {
     /// Copies the selection, or the current folder, to a folder the user picks.
     fn export(&mut self) {
         let Some(b) = &self.browser else { return };
+        let Some(fs) = b.fs.clone() else { return };
         let mut path = b.path.clone();
         let mut leaf = path.last().cloned().unwrap_or_else(|| "volume".into());
         if let Some(r) = b.selected.and_then(|i| b.rows.get(i)) {
@@ -570,10 +718,10 @@ impl App {
         let Some(dest) = pick_folder(self.hwnd) else { return };
         let Some(safe) = crate::names::host_component(leaf.as_bytes()) else { return };
         let dest = dest.join(safe);
-        let (target, src) = (b.target.clone(), format!("/{}", path.join("/")));
+        let src = format!("/{}", path.join("/"));
         self.set_busy("Exporting…");
         let w = self.wnd();
-        std::thread::spawn(move || match cli::export_path(&target, &src, &dest) {
+        std::thread::spawn(move || match cli::export_path(fs.as_ref(), &src, &dest) {
             Ok(n) => w.post(Msg::Done { note: Some(format!("Exported {n} files to {}", dest.display())) }),
             Err(e) => w.post(Msg::Failed(e)),
         });
@@ -634,7 +782,24 @@ impl App {
                     .map(|x| old.iter().find(|o| o.0 == x.target).map_or_else(Choice::default, |o| o.1.clone()))
                     .collect();
                 self.volumes = v;
+                // Keys of volumes that went away go with them; the rest stay unlocked.
+                let present = |u: &Unlocked| self.volumes.iter().any(|x| x.target == u.open.target);
+                self.unlocked.retain(present);
+                for x in self.volumes.iter_mut().filter(|x| x.locked) {
+                    if let Some(u) = self.unlocked.iter().find(|u| u.open.target == x.target) {
+                        *x = u.open.clone();
+                    }
+                }
                 self.selected = self.selected.min(self.volumes.len().saturating_sub(1));
+            }
+            Msg::Unlocked { key, volume } => {
+                self.busy = None;
+                if let Some(i) = self.volumes.iter().position(|x| x.target == volume.target) {
+                    let locked = std::mem::replace(&mut self.volumes[i], (*volume).clone());
+                    self.unlocked.retain(|u| u.open.target != volume.target);
+                    self.unlocked.push(Unlocked { key, locked, open: *volume });
+                    self.banner = Some((false, "Unlocked. Mount it, or browse its files".into()));
+                }
             }
             Msg::Added(v) => {
                 self.busy = None;
@@ -781,6 +946,7 @@ impl App {
     fn paint(&mut self) {
         let t = self.theme();
         self.regions.clear();
+        self.pass_rect = None;
         let (w, h) = (self.canvas.w, self.canvas.h);
         let side = self.canvas.px(280.0).min(w / 2);
         self.canvas.fill(Rect::new(0, 0, w, h), t.bg);
@@ -813,7 +979,9 @@ impl App {
             .iter()
             .map(|v| {
                 let name = if v.label.is_empty() { v.title.clone() } else { v.label.clone() };
-                let icon = if matches!(v.target, Target::Image { .. }) {
+                let icon = if v.locked {
+                    I_LOCK
+                } else if matches!(v.target, Target::Image { .. }) {
                     I_IMAGE
                 } else if v.removable {
                     I_USB
@@ -1010,15 +1178,20 @@ impl App {
         let (status, dot) = match &mounted {
             Some(m) if m.read_only => (format!("Read-only at {}", m.mount_point), t.warn),
             Some(m) => (format!("Mounted at {}", m.mount_point), t.ok),
+            None if v.locked => ("Locked".to_string(), t.muted),
             None => ("Not mounted".to_string(), t.muted),
         };
         let px = self.pill(r.right(), y + self.canvas.px(6.0), &status, dot);
         let title = Rect::new(r.x, y, px - r.x - self.canvas.px(12.0), self.canvas.px(36.0));
         self.canvas.text(title, &name, Font::Title, t.text, false);
         y += self.canvas.px(38.0);
-        let sub = format!("{} · {} · {}", v.kind, human(v.size), v.location);
+        let kind = if v.encrypted && !v.locked { format!("{} · encrypted", v.kind) } else { v.kind.clone() };
+        let sub = format!("{kind} · {} · {}", human(v.size), v.location);
         self.canvas.text(Rect::new(r.x, y, r.w, self.canvas.px(20.0)), &sub, Font::Body, t.muted, false);
         y += self.canvas.px(34.0);
+        if v.locked && mounted.is_none() {
+            return self.locked_details(r, y, &v);
+        }
 
         if let Some(e) = &v.error {
             let pr = Rect::new(r.x, y, r.w, self.canvas.px(60.0));
@@ -1068,6 +1241,9 @@ impl App {
             if v.mountable {
                 add(self, "Browse files", Act::Browse, false, 120.0);
             }
+            if self.key_of(&v.target).is_some() {
+                add(self, "Lock", Act::Lock, false, 88.0);
+            }
         }
         y += bh + self.canvas.px(20.0);
 
@@ -1112,7 +1288,9 @@ impl App {
         let inner = col - pad * 2;
         let c = self.choices.get(self.selected).cloned().unwrap_or_default();
         let on_auto = self.autos.contains(&v.uuid);
-        let can_auto = self.service == Service::Ready && !v.uuid.is_empty();
+        // Nothing could unlock an encrypted volume unattended: passphrases are never stored.
+        let can_auto = self.service == Service::Ready && !v.uuid.is_empty() && !v.encrypted;
+        let auto_hint = if v.encrypted { "Not available for encrypted volumes" } else { "Whenever this volume is present" };
         let head = self.canvas.px(44.0);
         let row = self.canvas.px(26.0);
         let option = self.canvas.px(52.0);
@@ -1165,7 +1343,7 @@ impl App {
                 oy += option;
             }
             let sr = Rect::new(left.x + pad, oy, inner, self.canvas.px(42.0));
-            self.switch(sr, "Mount automatically", "Whenever this volume is present", on_auto, can_auto, Act::ToggleAuto);
+            self.switch(sr, "Mount automatically", auto_hint, on_auto, can_auto, Act::ToggleAuto);
         }
 
         let about = if stacked {
@@ -1205,6 +1383,57 @@ impl App {
             end = card.bottom();
         }
         end
+    }
+
+    /// An encrypted volume before its passphrase is given: the way in, then what its
+    /// header says.
+    fn locked_details(&mut self, r: Rect, y: i32, v: &Volume) -> i32 {
+        let t = self.theme();
+        let px = |me: &App, v: f32| me.canvas.px(v);
+        let (radius, pad, head, row) = (px(self, 8.0), px(self, 16.0), px(self, 44.0), px(self, 26.0));
+        let inner = r.w - pad * 2;
+        let text = "Type the passphrase you use when Linux starts. The volume stays unlocked until you lock it or \
+                    close NixMount, and the passphrase is never saved.";
+        let text_h = self.canvas.wrapped_height(text, Font::Body, inner);
+        let field_h = px(self, 36.0);
+        let card = Rect::new(r.x, y, r.w, head + text_h + px(self, 14.0) + field_h + pad);
+        self.canvas.card(card, radius, t.card, t.line);
+        let tr = Rect::new(card.x + pad, y + px(self, 12.0), inner, px(self, 22.0));
+        self.canvas.text(tr, "This volume is encrypted", Font::Strong, t.text, false);
+        self.canvas.paragraph(Rect::new(card.x + pad, y + head, inner, text_h), text, Font::Body, t.muted);
+        let fy = y + head + text_h + px(self, 14.0);
+        let (bw, gap) = (px(self, 104.0), px(self, 8.0));
+        let field = Rect::new(card.x + pad, fy, inner - bw - gap, field_h);
+        // SAFETY: only asks which window has the keyboard.
+        let focused = !self.pass.is_null() && unsafe { GetFocus() } == self.pass;
+        self.canvas.card(field, px(self, 6.0), t.bg, if focused { t.accent } else { t.line });
+        if self.pass.is_null() {
+            // A headless render has no native field, so it shows what one would.
+            let cue = Rect::new(field.x + px(self, 12.0), field.y, field.w - px(self, 24.0), field.h);
+            self.canvas.text(cue, "Passphrase", Font::Body, t.muted, false);
+        }
+        self.region(field, Act::FocusPass);
+        self.pass_rect = Some(field);
+        self.button(Rect::new(field.right() + gap, fy, bw, field_h), "Unlock", Act::Unlock, true);
+
+        let features = v.features.join(", ");
+        let label_w = px(self, 68.0);
+        let features_h = self.canvas.wrapped_height(&features, Font::Small, inner - label_w);
+        let about = Rect::new(r.x, card.bottom() + pad, r.w, head + row * 2 + features_h.max(row) + pad);
+        self.canvas.card(about, radius, t.card, t.line);
+        let tr = Rect::new(about.x + pad, about.y + px(self, 12.0), inner, px(self, 22.0));
+        self.canvas.text(tr, "About this volume", Font::Strong, t.text, false);
+        let mut ay = about.y + head;
+        self.fact(about.x + pad, ay, inner, "Type", &v.kind);
+        ay += row;
+        let uuid = if v.uuid.is_empty() { "Unknown" } else { &v.uuid };
+        self.fact(about.x + pad, ay, inner, "UUID", uuid);
+        ay += row;
+        let lr = Rect::new(about.x + pad, ay, label_w, px(self, 22.0));
+        self.canvas.text(lr, "Encryption", Font::Small, t.muted, false);
+        let fr = Rect::new(about.x + pad + label_w, ay + px(self, 3.0), inner - label_w, features_h);
+        self.canvas.paragraph(fr, &features, Font::Small, t.muted);
+        about.bottom()
     }
 
     fn chip_width(&self, s: &str) -> i32 {
@@ -1431,6 +1660,35 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
                 a.canvas.present(dc);
                 EndPaint(hwnd, &ps);
             }
+            a.place_pass();
+            0
+        }
+        WM_CTLCOLOREDIT if lp as HWND == a.pass => {
+            let t = a.theme();
+            // SAFETY: wParam is the field's device context for this message.
+            unsafe {
+                SetTextColor(wp as HDC, colorref(t.text));
+                SetBkColor(wp as HDC, colorref(t.bg));
+            }
+            a.field_brush() as LRESULT
+        }
+        WM_COMMAND if wp & 0xFFFF == ID_PASS => {
+            // The field gained or lost the keyboard: its outline follows.
+            const EN_SETFOCUS: usize = 0x0100;
+            const EN_KILLFOCUS: usize = 0x0200;
+            if matches!(wp >> 16, EN_SETFOCUS | EN_KILLFOCUS) {
+                a.invalidate();
+            }
+            0
+        }
+        WM_UNLOCK => {
+            a.act(Act::Unlock);
+            0
+        }
+        WM_LBUTTONDOWN => {
+            // A click anywhere else takes the keyboard back from the passphrase field.
+            // SAFETY: the window is alive.
+            unsafe { SetFocus(hwnd) };
             0
         }
         WM_ERASEBKGND => 1,
@@ -1449,6 +1707,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             // SAFETY: lParam points at the suggested RECT for this message.
             let r = unsafe { &*(lp as *const RECT) };
             a.canvas.set_scale((wp & 0xFFFF) as f32 / 96.0);
+            // The fonts were remade, so the field takes the new one when next placed.
+            a.pass_at = None;
             // SAFETY: the window is alive.
             unsafe { SetWindowPos(hwnd, null_mut(), r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_NOZORDER) };
             0
@@ -1529,6 +1789,51 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
     }
 }
 
+/// A native password box. Typing, input methods, the clipboard rules for passwords and
+/// screen readers all come with it, which a painted field would have to imitate.
+fn passphrase_field(parent: HWND, inst: HINSTANCE) -> HWND {
+    let (class, cue) = (wide("EDIT"), wide("Passphrase"));
+    let style = WS_CHILD | WS_TABSTOP | (ES_PASSWORD | ES_AUTOHSCROLL) as u32;
+    // SAFETY: strings outlive the calls; the field is owned by `parent` and dies with it.
+    unsafe {
+        let h = CreateWindowExW(0, class.as_ptr(), null(), style, 0, 0, 0, 0, parent, ID_PASS as HMENU, inst, null());
+        if h.is_null() {
+            return h;
+        }
+        SetWindowSubclass(h, Some(pass_keys), 1, 0);
+        SendMessageW(h, windows_sys::Win32::UI::Controls::EM_SETCUEBANNER, 1, cue.as_ptr() as LPARAM);
+        const EM_SETLIMITTEXT: u32 = 0x00C5;
+        SendMessageW(h, EM_SETLIMITTEXT, 1024, 0);
+        h
+    }
+}
+
+/// Enter unlocks, Escape clears, and Tab hands the keyboard back to the window.
+unsafe extern "system" fn pass_keys(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM, _: usize, _: usize) -> LRESULT {
+    // SAFETY: `h` is the live field; its parent is the main window.
+    unsafe {
+        match (msg, wp as u16) {
+            (WM_KEYDOWN, VK_RETURN) => {
+                PostMessageW(GetParent(h), WM_UNLOCK, 0, 0);
+                0
+            }
+            (WM_KEYDOWN, VK_ESCAPE) => {
+                SetWindowTextW(h, [0u16].as_ptr());
+                0
+            }
+            (WM_KEYDOWN, VK_TAB) => {
+                let p = GetParent(h);
+                SetFocus(p);
+                PostMessageW(p, WM_KEYDOWN, VK_TAB as WPARAM, 0);
+                0
+            }
+            // Swallowed so the field doesn't beep at them.
+            (WM_CHAR, 0x09 | 0x0D | 0x1B) => 0,
+            _ => DefSubclassProc(h, msg, wp, lp),
+        }
+    }
+}
+
 pub fn run() {
     // Raw disks and the service pipe are admin-only by design.
     if !crate::install::elevated() && crate::install::relaunch_elevated("") {
@@ -1558,7 +1863,8 @@ pub fn run() {
             0,
             class.as_ptr(),
             title.as_ptr(),
-            WS_OVERLAPPEDWINDOW,
+            // The passphrase field is a child window, so painting must leave it alone.
+            WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
             1000,
@@ -1573,6 +1879,7 @@ pub fn run() {
         SetWindowPos(hwnd, null_mut(), 0, 0, w, h, SWP_NOMOVE | SWP_NOZORDER);
         let mut rc = std::mem::zeroed();
         GetClientRect(hwnd, &mut rc);
+        let pass = passphrase_field(hwnd, inst);
         let app = Box::into_raw(Box::new(App {
             hwnd,
             canvas: Canvas::new(rc.right, rc.bottom, scale),
@@ -1596,6 +1903,12 @@ pub fn run() {
             side_max: 0,
             detail_scroll: 0,
             detail_max: 0,
+            unlocked: vec![],
+            pass,
+            pass_rect: None,
+            pass_at: None,
+            pass_brush: None,
+            focus_pass: false,
         }));
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, app as isize);
         (*app).apply_title_bar();
@@ -1628,6 +1941,8 @@ pub fn screenshot(path: &std::path::Path, dark: bool, scene: &str, width: i32, h
         ro_reasons: vec![],
         notes: vec![],
         error: None,
+        encrypted: false,
+        locked: false,
     };
     const GB: u64 = 1 << 30;
     let ext4 = [
@@ -1648,6 +1963,15 @@ pub fn screenshot(path: &std::path::Path, dark: bool, scene: &str, width: i32, h
     }
     if scene == "empty" {
         volumes.clear();
+    }
+    if scene == "locked" {
+        let mut v = sample("", "LUKS2", 464 * GB, 0, false, &["LUKS2", "aes-xts-plain64", "512-bit key", "Argon2id"]);
+        v.title = "Disk 0 · Partition 2".into();
+        v.location = "Samsung SSD 970 EVO Plus".into();
+        v.used = None;
+        v.encrypted = true;
+        v.locked = true;
+        volumes.insert(0, v);
     }
     let hwnd = null_mut();
     let mounts = if scene == "mounted" {
@@ -1717,6 +2041,12 @@ pub fn screenshot(path: &std::path::Path, dark: bool, scene: &str, width: i32, h
         side_max: 0,
         detail_scroll: 0,
         detail_max: 0,
+        unlocked: vec![],
+        pass: null_mut(),
+        pass_rect: None,
+        pass_at: None,
+        pass_brush: None,
+        focus_pass: false,
     };
     a.paint();
     let _ = a.canvas.save_bmp(path);

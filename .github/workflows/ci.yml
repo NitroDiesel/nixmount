@@ -15,16 +15,21 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
-      - run: sudo apt-get update && sudo apt-get install -y e2fsprogs btrfs-progs
-      - run: mke2fs -V; btrfs --version; uname -r
+      - run: sudo apt-get update && sudo apt-get install -y e2fsprogs btrfs-progs cryptsetup
+      - run: mke2fs -V; btrfs --version; cryptsetup --version; uname -r
       - name: Engines vs e2fsck / btrfs check
-        run: cargo test --no-fail-fast --profile ci-test -p ext4 -p btrfs -p fscore -- --nocapture --test-threads=4
+        run: cargo test --no-fail-fast --profile ci-test -p ext4 -p btrfs -p fscore -p luks -- --nocapture --test-threads=4
       - name: Linux kernel reads what the engines wrote
         run: bash ci/kernel-check.sh "$NIXMOUNT_OUT"
       - name: Kernel-made images (dirty journals, compression, shared snapshots)
         run: |
           cargo test --profile ci-test -p ext4 --test dirty -- --nocapture
           cargo test --profile ci-test -p btrfs --test kernel -- --nocapture
+      - name: LUKS volumes from cryptsetup, unlocked and edited here, then judged by Linux
+        run: |
+          bash ci/luks-check.sh make "$NIXMOUNT_OUT/luks"
+          NIXMOUNT_LUKS="$NIXMOUNT_OUT/luks" cargo test --profile ci-test -p luks --test cryptsetup -- --nocapture --test-threads=1
+          bash ci/luks-check.sh verify "$NIXMOUNT_OUT/luks"
       - name: Publish fixture images
         if: always()
         run: bash ci/make-fixtures.sh fixtures
@@ -42,7 +47,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release --locked -p nixmount
-      - run: cargo test -p fscore -p ext4 -p btrfs -p nixmount
+      - run: cargo test -p fscore -p ext4 -p btrfs -p luks -p nixmount
       - name: End to end through the real service and WinFsp
         shell: pwsh
         env:
@@ -76,7 +81,7 @@ jobs:
         with:
           name: e2e-images
           path: e2e
-      - run: sudo apt-get update && sudo apt-get install -y e2fsprogs btrfs-progs
+      - run: sudo apt-get update && sudo apt-get install -y e2fsprogs btrfs-progs cryptsetup
       - name: e2fsck
         run: |
           for f in e2e/ext*.img; do
@@ -94,3 +99,13 @@ jobs:
           sudo mount -o loop,ro -t btrfs e2e/btrfs-default.img m
           grep -q "content 1" m/e2e/renamed.txt
           sudo umount m
+      - name: Linux unlocks the encrypted volume Windows wrote to
+        run: |
+          [ -f e2e/luks2-btrfs.img ] || { echo "no encrypted fixture yet"; exit 0; }
+          printf 'nixmount\n' | sudo cryptsetup open e2e/luks2-btrfs.img nm-e2e
+          sudo btrfs check --readonly --check-data-csum /dev/mapper/nm-e2e
+          mkdir -p luks
+          sudo mount -o ro /dev/mapper/nm-e2e luks
+          grep -q "written through LUKS" luks/e2e-luks.txt
+          sudo umount luks
+          sudo cryptsetup close nm-e2e

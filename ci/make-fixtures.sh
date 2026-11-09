@@ -27,4 +27,15 @@ ext ext2-2k -t ext2 -b 2048
 truncate -s 128M "$out/btrfs-default.img"
 mkfs.btrfs -q -f --rootdir "$src" "$out/btrfs-default.img"
 gzip -9f "$out/btrfs-default.img"
+
+# Encrypted the way installers do it: LUKS2 holding Btrfs. The passphrase is "nixmount", and
+# small key-derivation costs and a small header keep the fixture quick and compact.
+img="$out/luks2-btrfs.img"
+truncate -s 128M "$img"
+printf '%s' nixmount | sudo cryptsetup luksFormat --batch-mode --key-file=- --type luks2 --pbkdf argon2id \
+  --pbkdf-memory 65536 --pbkdf-force-iterations 4 --luks2-metadata-size 16k --luks2-keyslots-size 256k "$img"
+printf 'nixmount\n' | sudo cryptsetup open "$img" nm-fixture
+sudo mkfs.btrfs -q -f --rootdir "$src" /dev/mapper/nm-fixture
+sudo cryptsetup close nm-fixture
+gzip -9f "$img"
 ls -la "$out"

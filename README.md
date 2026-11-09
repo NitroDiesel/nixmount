@@ -1,6 +1,7 @@
 # NixMount
 
-Mount ext2, ext3, ext4 and Btrfs volumes on Windows, with drive letters, in one small program.
+Mount ext2, ext3, ext4 and Btrfs volumes on Windows, LUKS-encrypted ones included, with drive
+letters, in one small program.
 
 ![NixMount showing a mounted Btrfs volume](docs/images/mounted-dark.png)
 
@@ -16,6 +17,7 @@ can't crash Windows.
 | Bad data on disk | Can crash the machine | An error on that request |
 | ext4 writes | Not journaled | Journaled through the real jbd2 log |
 | Mounting read-only | May replay the journal to disk | Never writes: recovery happens in memory |
+| Encrypted (LUKS) volumes | Not supported | Unlocked with their passphrase |
 | Secure Boot | Workarounds or a paid signature | Nothing to sign |
 | Source | About 220,000 lines of C and C++, with bundled libraries | About 15,000 lines of Rust |
 | Memory | Kernel pool | 5 MB for the interface, 2 MB for the idle service |

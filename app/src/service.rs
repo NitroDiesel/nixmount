@@ -1,7 +1,7 @@
 //! The Windows service: owns all mounts, so they outlive the interface, reach every
 //! logon session, and shut down cleanly with the machine.
 use crate::config::{Automount, Config};
-use crate::ipc::{self, Request, Response, ScrubState};
+use crate::ipc::{self, Request, Response, ScrubState, Secret};
 use crate::mounts::Mounts;
 use crate::volumes;
 use std::collections::BTreeSet;
@@ -16,6 +16,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 };
 
 pub const NAME: &str = "NixMount";
+pub const NO_AUTO_ENCRYPTED: &str = "Encrypted volumes can't mount automatically, because NixMount never stores passphrases";
 const SERVICE_WIN32_OWN: u32 = SERVICE_WIN32_OWN_PROCESS;
 const DBT_DEVICEARRIVAL: u32 = 0x8000;
 const DBT_DEVICEREMOVECOMPLETE: u32 = 0x8004;
@@ -161,7 +162,7 @@ fn automount(mounts: &Mounts) -> bool {
             settled = false;
             continue;
         }
-        settled &= mounts.mount(req).is_ok();
+        settled &= mounts.mount(req, None).is_ok();
     }
     settled
 }
@@ -178,10 +179,13 @@ fn handle(r: Request) -> Response {
         Request::Scan => {
             let mut all = volumes::scan_disks();
             all.extend(Config::load().images.iter().map(|p| volumes::describe_image(p)));
-            // A partition mounted read-write is locked, so a rescan can't see it.
+            // A partition mounted read-write is locked, so a rescan can't see it. An encrypted
+            // one shows only its header to a scan, while the mount knows what it holds.
             for v in s.mounts.volumes() {
-                if !all.iter().any(|x| x.target == v.target) {
-                    all.push(v);
+                match all.iter_mut().find(|x| x.target == v.target) {
+                    Some(x) if x.encrypted => *x = v,
+                    Some(_) => {}
+                    None => all.push(v),
                 }
             }
             Response::Volumes(all)
@@ -197,7 +201,9 @@ fn handle(r: Request) -> Response {
             }
             Response::Volume(Box::new(v))
         }
-        Request::Mount(m) => s.mounts.mount(m).map_or_else(Response::Error, Response::Mounted),
+        Request::Mount { mount, key } => {
+            s.mounts.mount(mount, key.map(Secret::into_key)).map_or_else(Response::Error, Response::Mounted)
+        }
         Request::Unmount { point } => {
             let uuid = s.mounts.uuid_at(&point);
             let result = s.mounts.unmount(&point);
@@ -213,6 +219,9 @@ fn handle(r: Request) -> Response {
         Request::CreateSubvolume { point, name } => done(s.mounts.create_subvolume(&point, &name)),
         Request::DeleteSubvolume { point, name } => done(s.mounts.delete_subvolume(&point, &name)),
         Request::SetAutomount { uuid, mount } => {
+            if mount.as_ref().is_some_and(|m| volumes::luks_header(&m.target).is_some()) {
+                return Response::Error(NO_AUTO_ENCRYPTED.into());
+            }
             let mut c = Config::load();
             c.automounts.retain(|a| a.uuid != uuid);
             dismissed().remove(&uuid);

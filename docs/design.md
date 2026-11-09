@@ -35,6 +35,7 @@ change the path in `install.rs`.
 crates/fscore   Block device trait, partition and signature detection, the Filesystem trait
 crates/ext4     ext2/3/4 engine            #![forbid(unsafe_code)]
 crates/btrfs    Btrfs engine               #![forbid(unsafe_code)]
+crates/luks     LUKS1/LUKS2 unlocking and sector encryption   #![forbid(unsafe_code)]
 app             The Windows executable:
                   winfsp.rs   Serves a Filesystem through WinFsp
                   service.rs  Owns the mounts, as a Windows service
@@ -99,6 +100,17 @@ Free space comes from the committed extent tree, not the on-disk caches: it is t
 truth, and it can't be stale. The free space tree is updated incrementally, and a v1 cache is
 invalidated, which Linux rebuilds.
 
+## LUKS: one more block device
+
+An unlocked LUKS volume is a `BlockDev` that decrypts on read and encrypts on write, sector by
+sector as dm-crypt does, so the engines run on it unchanged. Unlocking derives a key from the
+passphrase with the keyslot's own Argon2 or PBKDF2 settings, decrypts the keyslot, merges its
+anti-forensic stripes, and checks the result against the header's digest. AES comes from the
+RustCrypto crates, using AES-NI where the CPU has it.
+
+The interface or command line unlocks, so the passphrase never crosses into the service: only
+the key does, when a volume is mounted.
+
 ## Interface
 
 The window is plain Win32. Shapes are rasterized into a DIB by `canvas.rs` and text is drawn by
@@ -124,9 +136,10 @@ independent judges. Each runs in CI on every push.
 | Corrupted images | Random damage must give errors, never a panic or hang. On Btrfs the damage is re-signed with valid checksums, as an attacker would |
 | Full volumes | Filling a volume must fail cleanly, and still pass `e2fsck` or `btrfs check` afterwards |
 | Windows end to end | The real service, WinFsp, drive letters and raw partitions on a Windows runner, with the resulting images then checked by `e2fsck` and `btrfs check` on Linux |
+| cryptsetup | LUKS volumes in five configurations made by `cryptsetup` and filled by the kernel are unlocked, read and edited here, then decrypted by Linux and checked as above. cryptsetup's own test images must decrypt to the checksums its test suite expects |
 
 Run the portable subset with `cargo test`. Tests needing the Linux tools skip themselves when
-they aren't installed. `ci/kernel-check.sh` and `ci/windows-e2e.ps1` are the two end-to-end
-stages, and `ci/make-fixtures.sh` regenerates the images in `tests/fixtures`.
+they aren't installed. `ci/kernel-check.sh`, `ci/luks-check.sh` and `ci/windows-e2e.ps1` are the
+end-to-end stages, and `ci/make-fixtures.sh` regenerates the images in `tests/fixtures`.
 
 [WinFsp]: https://winfsp.dev/rel/

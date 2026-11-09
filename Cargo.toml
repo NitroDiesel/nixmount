@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/fscore", "crates/ext4", "crates/btrfs", "app"]
+members = ["crates/fscore", "crates/ext4", "crates/btrfs", "crates/luks", "app"]
 
 [workspace.package]
 version = "0.1.2"

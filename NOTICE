@@ -20,5 +20,12 @@ executable carries it for setup. The DLL is loaded at run time from where that i
   WinFsp - Windows File System Proxy, Copyright (C) Bill Zissimopoulos
   https://github.com/winfsp/winfsp
 
+LUKS support is new code written against the LUKS1 and LUKS2 specifications. Three test
+images in tests/fixtures/cryptsetup come from cryptsetup's own test suite (GPL-2.0-or-later),
+re-compressed and renamed, and are only used by tests:
+
+  cryptsetup, by Clemens Fruhwirth, Milan Broz and contributors
+  https://gitlab.com/cryptsetup/cryptsetup
+
 Third-party Rust crates are used under their own permissive licenses, all compatible with
 GPL-2.0: see Cargo.lock for the list.

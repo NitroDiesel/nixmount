@@ -50,6 +50,26 @@ volumes at all, and did not journal its writes.
 Deleting a subvolume unlinks it at once. Its blocks are freed the next time Linux mounts the
 volume read-write.
 
+## LUKS encryption
+
+An unlocked volume is read and written exactly like an unencrypted one, so the tables above
+apply to what it holds.
+
+| Feature | Supported |
+|---|---|
+| LUKS1 and LUKS2 | Yes |
+| AES-XTS, and AES-CBC with ESSIV or plain IVs | Yes |
+| Argon2id, Argon2i, and PBKDF2 with SHA-1, SHA-256 or SHA-512 | Yes |
+| Encryption sectors of 512 to 4096 bytes | Yes |
+| Damaged primary LUKS2 header | Opens from the second copy |
+| Unlocking with a TPM, FIDO2 key or smart card | No: add a passphrase in Linux |
+| Key files and detached headers | No |
+| Other ciphers, such as Serpent, Twofish or Adiantum | No |
+| Integrity protection (`--integrity`), re-encryption in progress | No |
+| LVM inside LUKS, and Btrfs spanning several encrypted devices | No |
+
+Ext4Fsd and WinBtrfs could not open encrypted volumes at all.
+
 ## What changed from the original programs
 
 Replaced by something better:

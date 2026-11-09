@@ -9,8 +9,8 @@ traditionally parsed in the kernel.
 The second threat is **an unprivileged local user** trying to use NixMount's privileged service
 to gain access they shouldn't have.
 
-NixMount doesn't defend against an administrator, or against someone with physical access to a
-disk: volumes aren't encrypted, and Linux permissions aren't enforced on Windows.
+NixMount doesn't defend against an administrator, or against someone with physical access to an
+unencrypted disk. Linux permissions aren't enforced on Windows.
 
 ## Hostile disks
 
@@ -44,6 +44,18 @@ The service runs as SYSTEM, so its boundaries matter:
   only an administrator can have put the program in place.
 - WinFsp's DLL is loaded by absolute path from the registry, which keeps DLL search-order attacks
   out of the process.
+
+## Encrypted volumes
+
+- The passphrase stays in the window or command that unlocks. It never reaches the service, is
+  never saved, and NixMount wipes its copies once the key is derived.
+- Mounting sends the service the volume key over the admin-only pipe. Messages carrying it are
+  wiped once read, and the key itself when the volume is locked or unmounted.
+- A key is checked against the volume's own digest before use, so a wrong one can't turn writes
+  into garbage.
+- Header values from a hostile disk are bounded: every offset is checked against the device, and
+  key derivation asking for more than 4 GiB of memory is refused instead of attempted.
+- Once mounted, an encrypted volume is as readable to signed-in users as any other mount.
 
 ## Setup
 
