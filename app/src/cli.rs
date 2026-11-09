@@ -121,6 +121,11 @@ fn read_passphrase(prompt: &str) -> Result<Zeroizing<String>, String> {
     while line.ends_with(['\r', '\n']) {
         line.pop();
     }
+    // Windows PowerShell can put a byte order mark before piped text. Nobody can type one at
+    // a boot prompt, so it is never part of a passphrase.
+    if line.starts_with('\u{FEFF}') {
+        line.remove(0);
+    }
     Ok(line)
 }
 
