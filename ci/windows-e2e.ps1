@@ -135,8 +135,12 @@ if (Test-Path 'tests/fixtures/luks2-btrfs.img.gz') {
     $code = $LASTEXITCODE
     $ErrorActionPreference = 'Stop'
     Check 'an encrypted volume is never remembered for automounting' (($code -ne 0) -and ($said -match 'never stores'))
+    # Progress goes to stderr, which Windows PowerShell would otherwise treat as a failure.
+    $ErrorActionPreference = 'Continue'
     'nixmount' | & $Exe mount $img 'N:' --rw 2>&1 | Out-Host
-    Check 'the right passphrase mounts it' ($LASTEXITCODE -eq 0)
+    $code = $LASTEXITCODE
+    $ErrorActionPreference = 'Stop'
+    Check 'the right passphrase mounts it' ($code -eq 0)
     Check 'files come out decrypted' ((Get-Content 'N:\hello.txt') -eq 'hello from linux')
     Set-Content 'N:\e2e-luks.txt' 'written through LUKS'
     Copy-Item "$env:WINDIR\notepad.exe" 'N:\copy.exe'
