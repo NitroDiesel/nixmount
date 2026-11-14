@@ -73,6 +73,57 @@ fn edits_kernel_snapshots() {
     assert_eq!(seen, want.keys().filter(|k| k.matches('/').count() == 1).count());
 }
 
+/// A volume shaped like a real install: a block group tree, a filesystem id changed after
+/// the fact, and files the kernel compressed. Everything on it is then overwritten, cut
+/// short, moved and deleted here, with `btrfs check` and the kernel judging the result.
+#[test]
+fn edits_a_lived_in_volume() {
+    let Some(out) = dir() else { return };
+    let img = out.join("kernel-lived.image");
+    if !img.exists() {
+        return;
+    }
+    let want = host_tree(&out.join("kernel-lived.src"));
+    let fs = open(&img, false);
+    let features = fs.info().features;
+    for f in ["block_group_tree", "metadata_uuid", "compress_zstd"] {
+        assert!(features.iter().any(|x| x == f), "the image lacks {f}: {features:?}");
+    }
+    assert_same(&walk(&fs).unwrap(), &want, "lived: read");
+    drop(fs);
+
+    let check = |ctx: &str| {
+        let o = Command::new("btrfs").args(["check", "--check-data-csum"]).arg(&img).output().unwrap();
+        assert!(o.status.success(), "{ctx}\n{}\n{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
+    };
+    let mut model = Model::from_tree(&want);
+    let mut rng = Rng(0x11FE);
+    for pass in 0..3 {
+        let fs = open(&img, true);
+        assert!(!fs.info().read_only, "lived: refused write: {:?}", fs.info().ro_reasons);
+        random_ops(&fs, &mut model, &mut rng, 800, 150_000);
+        assert_same(&walk(&fs).unwrap(), &model.tree(), &format!("lived: live pass {pass}"));
+        fs.unmount().unwrap();
+        drop(fs);
+        check(&format!("lived: pass {pass}"));
+        let fs = open(&img, false);
+        assert_same(&walk(&fs).unwrap(), &model.tree(), &format!("lived: reread pass {pass}"));
+        let rep = fs.scrub(&mut |_, _| {}).unwrap();
+        assert!(rep.errors.is_empty(), "lived: scrub after pass {pass}: {:?}", rep.errors);
+    }
+
+    // The kernel must read back exactly what the model holds.
+    let (model_dir, mnt) = (out.join("kernel-lived.model"), out.join("kernel-lived.mnt"));
+    dump(&model.tree(), &model_dir);
+    std::fs::create_dir_all(&mnt).unwrap();
+    let sudo = |args: &[&std::ffi::OsStr]| Command::new("sudo").args(args).output().unwrap();
+    let mounted = sudo(&["mount".as_ref(), "-o".as_ref(), "loop,ro".as_ref(), img.as_os_str(), mnt.as_os_str()]);
+    assert!(mounted.status.success(), "the kernel refused the volume: {}", String::from_utf8_lossy(&mounted.stderr));
+    let diff = sudo(&["diff".as_ref(), "-r".as_ref(), "--no-dereference".as_ref(), mnt.as_os_str(), model_dir.as_os_str()]);
+    sudo(&["umount".as_ref(), mnt.as_os_str()]);
+    assert!(diff.status.success(), "the kernel reads it differently:\n{}", String::from_utf8_lossy(&diff.stdout));
+}
+
 /// Parity profiles must read correctly, refuse writes, and survive a lost device.
 #[test]
 fn raid5_reads_and_rebuilds() {

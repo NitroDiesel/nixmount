@@ -80,6 +80,25 @@ sudo umount "$mnt"
 sudo losetup -d "${loops[@]}"
 sudo chown "$(id -u)" "$out"/kernel-*.image
 
+# A volume shaped like a real install: a block group tree, files the kernel compressed with
+# zstd, and a filesystem id changed after the fact. The engine then edits all of it.
+img="$out/kernel-lived.image"
+src="$out/kernel-lived.src"
+truncate -s 1G "$img"
+mkfs.btrfs -q -f -O block-group-tree "$img"
+mkdir -p "$src/etc" "$src/home/user/projects"
+head -c 4000000 < <(yes "the quick brown fox jumps over the lazy dog") > "$src/home/user/notes.txt"
+head -c 1500000 /dev/urandom > "$src/home/user/photo.bin"
+{ head -c 300000 /dev/urandom; head -c 900000 < <(yes abcdefgh); head -c 100000 /dev/urandom; } > "$src/home/user/projects/mixed.bin"
+seq 1 200000 > "$src/home/user/projects/numbers.txt"
+for i in $(seq 1 300); do echo "setting $i = value $i" > "$src/etc/conf-$i"; done
+sudo mount -o loop,compress=zstd "$img" "$mnt"
+sudo cp -r "$src/." "$mnt/"
+sync
+sudo umount "$mnt"
+sudo chown "$(id -u)" "$img"
+btrfstune -m "$img"
+
 # A deleted subvolume is only orphaned by the engine. Let the kernel's cleaner drop it:
 # that walks every reference in the tree, so it also audits the engine's snapshot accounting.
 sudo mount -o loop "$out/btrfs-snap.img" "$mnt"
