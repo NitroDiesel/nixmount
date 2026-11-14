@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use std::ptr::{null, null_mut};
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
 use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::Graphics::Dwm::*;
@@ -219,6 +220,7 @@ struct App {
     /// never starts, and a key it finds is wiped unused.
     unlocking: Option<Target>,
     unlock_job: Arc<AtomicU64>,
+    unlock_began: Option<Instant>,
     /// The native passphrase field, where it should be this frame, and where it is.
     pass: HWND,
     pass_rect: Option<Rect>,
@@ -368,6 +370,7 @@ impl App {
         self.set_busy("Unlocking… this takes a few seconds");
         let job = self.unlock_job.fetch_add(1, Relaxed) + 1;
         self.unlocking = Some(v.target.clone());
+        self.unlock_began = Some(Instant::now());
         let (w, wanted) = (self.wnd(), self.unlock_job.clone());
         std::thread::spawn(move || {
             if let Some(result) = try_unlock(&v, pass.as_bytes(), job, &wanted) {
@@ -784,8 +787,16 @@ impl App {
                     self.scan();
                 }
             }
-            Msg::Volumes(v) => {
+            Msg::Volumes(mut v) => {
                 self.busy = None;
+                // The service remembers added images. Without it only this list does, so a
+                // scan of the disks must not drop them.
+                if self.service != Service::Ready {
+                    let is_image = |x: &&Volume| matches!(x.target, Target::Image { .. });
+                    let kept: Vec<Volume> =
+                        self.volumes.iter().filter(is_image).filter(|x| !v.iter().any(|n| n.target == x.target)).cloned().collect();
+                    v.extend(kept);
+                }
                 let old: Vec<(Target, Choice)> =
                     self.volumes.iter().map(|x| x.target.clone()).zip(self.choices.iter().cloned()).collect();
                 self.choices = v
@@ -1568,6 +1579,20 @@ impl App {
         self.scrollbar(x, list_top, bottom - list_top, first as i32, fits as i32, rows.len() as i32);
     }
 
+    /// A click at a point of the window.
+    fn click(&mut self, x: i32, y: i32) {
+        self.focus = None;
+        let Some(act) = self.hit(x, y).map(|r| r.act.clone()) else { return };
+        // Cancel takes Unlock's place, so the second half of a double click on Unlock can
+        // land on it. That is not somebody changing their mind.
+        // SAFETY: takes no arguments.
+        let double = Duration::from_millis(unsafe { GetDoubleClickTime() }.into());
+        if act == Act::CancelUnlock && self.unlock_began.is_some_and(|t| t.elapsed() < double) {
+            return;
+        }
+        self.act(act);
+    }
+
     fn hit(&self, x: i32, y: i32) -> Option<&Region> {
         self.regions.iter().rev().find(|r| r.rect.contains(x, y))
     }
@@ -1784,10 +1809,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPARAM) 
             1
         }
         WM_LBUTTONUP => {
-            a.focus = None;
-            if let Some(act) = a.hit(lo, hi).map(|r| r.act.clone()) {
-                a.act(act);
-            }
+            a.click(lo, hi);
             0
         }
         WM_MOUSEWHEEL => {
@@ -1944,6 +1966,7 @@ pub fn run() {
             unlocked: vec![],
             unlocking: None,
             unlock_job: Arc::default(),
+            unlock_began: None,
             pass,
             pass_rect: None,
             pass_at: None,
@@ -2088,6 +2111,7 @@ fn staged(dark: bool, scene: &str, width: i32, height: i32, scale: f32) -> App {
         unlocked: vec![],
         unlocking,
         unlock_job: Arc::default(),
+        unlock_began: None,
         pass: null_mut(),
         pass_rect: None,
         pass_at: None,
@@ -2125,8 +2149,12 @@ mod tests {
         // While unlocking, Cancel stands where Unlock was.
         assert!(offers(&a, Act::CancelUnlock) && !offers(&a, Act::Unlock));
         let r = a.regions.iter().find(|r| r.act == Act::CancelUnlock).unwrap().rect;
-        let clicked = a.hit(r.x + r.w / 2, r.y + r.h / 2).map(|r| r.act.clone()).unwrap();
-        a.act(clicked);
+        // The second half of a double click on Unlock lands here, and means nothing.
+        a.unlock_began = Some(Instant::now());
+        a.click(r.x + r.w / 2, r.y + r.h / 2);
+        assert!(a.busy.is_some() && a.unlocking.is_some());
+        a.unlock_began = Instant::now().checked_sub(Duration::from_secs(5));
+        a.click(r.x + r.w / 2, r.y + r.h / 2);
         assert!(a.busy.is_none() && a.unlocking.is_none() && a.focus_pass);
         a.paint();
         assert!(offers(&a, Act::Unlock) && !offers(&a, Act::CancelUnlock));
@@ -2134,6 +2162,25 @@ mod tests {
         let late = found(&a, job);
         a.receive(late);
         assert!(a.volumes[0].locked && a.unlocked.is_empty() && a.banner.is_none());
+    }
+
+    /// Before setup nothing but the window remembers an added image.
+    #[test]
+    fn a_scan_keeps_added_images_only_when_no_service_remembers_them() {
+        let image = || {
+            let target = Target::Image { path: r"C:\images\root.img".into(), partition: None };
+            Volume::new(target, "root.img".into(), r"C:\images".into(), 1 << 30, "ext4".into())
+        };
+        let mut a = staged(true, "setup", 1000, 640, 1.0);
+        a.volumes.push(image());
+        a.choices.push(Choice::default());
+        a.receive(Msg::Volumes(vec![]));
+        assert!(a.volumes.len() == 1 && a.volumes[0].title == "root.img" && a.choices.len() == 1);
+
+        let mut a = staged(true, "default", 1000, 640, 1.0);
+        a.volumes.push(image());
+        a.receive(Msg::Volumes(vec![]));
+        assert!(a.volumes.is_empty());
     }
 
     #[test]
