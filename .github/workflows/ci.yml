@@ -58,6 +58,11 @@ jobs:
         run: |
           Invoke-WebRequest https://github.com/NitroDiesel/nixmount/releases/latest/download/NixMount-Setup.exe -OutFile last-release.exe
           ci/windows-upgrade.ps1 -Old (Resolve-Path last-release.exe).Path -New (Resolve-Path target/release/nixmount.exe).Path -Out upgrade
+      - name: Upgrading from 0.2.1 moves its settings to where they live now
+        shell: pwsh
+        run: |
+          Invoke-WebRequest https://github.com/NitroDiesel/nixmount/releases/download/v0.2.1/NixMount-Setup.exe -OutFile release-0.2.1.exe
+          ci/windows-upgrade.ps1 -Old (Resolve-Path release-0.2.1.exe).Path -New (Resolve-Path target/release/nixmount.exe).Path -Out upgrade-0.2.1
       - name: The bundled installer is the official, unmodified release
         shell: pwsh
         run: |
