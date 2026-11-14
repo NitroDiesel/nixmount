@@ -138,11 +138,18 @@ pub fn prepare() -> Result<(), String> {
 /// folder, so it is believed only if its permissions show that an install locked it, and
 /// otherwise left exactly as it is: it isn't ours.
 fn bring_over(old: &Path, new: &Path) {
-    if !locked_down(old) {
-        return;
+    if locked_down(old) {
+        move_settings(old, new);
     }
-    let _ = std::fs::copy(old.join(FILE), new.join(FILE));
-    remove_from(old);
+}
+
+/// The old copy goes only once the new one is in place: settings that can't be copied stay
+/// where they were, not nowhere.
+fn move_settings(old: &Path, new: &Path) {
+    let from = old.join(FILE);
+    if !from.exists() || std::fs::copy(&from, new.join(FILE)).is_ok() {
+        remove_from(old);
+    }
 }
 
 fn remove_from(d: &Path) {
@@ -188,6 +195,21 @@ mod tests {
         std::fs::write(old.join(FILE), r#"{"images":["C:\\planted.img"]}"#).unwrap();
         bring_over(&old, &new);
         assert!(old.join(FILE).exists() && !new.join(FILE).exists());
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    #[test]
+    fn settings_move_whole_or_not_at_all() {
+        let base = std::env::temp_dir().join(format!("nixmount-move-{}", std::process::id()));
+        let (old, new) = (base.join("old"), base.join("new"));
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::write(old.join(FILE), "{}").unwrap();
+        // Nowhere to copy to: the settings stay where they were.
+        move_settings(&old, &new);
+        assert!(old.join(FILE).exists());
+        std::fs::create_dir_all(&new).unwrap();
+        move_settings(&old, &new);
+        assert!(new.join(FILE).exists() && !old.exists());
         std::fs::remove_dir_all(&base).unwrap();
     }
 }

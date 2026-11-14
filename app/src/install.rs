@@ -168,13 +168,11 @@ pub fn install() -> Result<(), String> {
     // An upgrade has to stop the running copy. Its mounts close cleanly on the way.
     service::stop()?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    config::prepare()?;
-    if this != dest {
-        if let Err(e) = replace_program(&this, &dest) {
-            // Whatever is installed is better running than not.
-            let _ = service::register(&dest);
-            return Err(e);
-        }
+    let placed = config::prepare().and_then(|()| if this == dest { Ok(()) } else { replace_program(&this, &dest) });
+    if let Err(e) = placed {
+        // Whatever is installed is better running than not.
+        let _ = service::register(&dest);
+        return Err(e);
     }
     ensure_winfsp(&dir)?;
     service::register(&dest)?;
