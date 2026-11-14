@@ -13,7 +13,9 @@
 //! nixmount-<hash>.exe --ignored --nocapture rehearse
 //! ```
 //!
-//! It reports counts and errors, never a name from the volume.
+//! It reports counts and errors, never a name from the volume. With
+//! `NIXMOUNT_REHEARSE_SCRUB=1` it ends by checking every checksum; with `=only` it does
+//! nothing else, and writes nothing even in memory.
 use crate::disk::RawDev;
 use fscore::part::{self, FsKind};
 use fscore::{BlockDev, FileKind, Filesystem, FsError, Ino, MountOpts, NewNode, Owner, Result, SetAttr};
@@ -400,6 +402,30 @@ fn open(dev: Arc<dyn BlockDev>, write: bool) -> Result<Arc<dyn Filesystem>> {
     })
 }
 
+/// Checks every checksum on the volume, saying how far it has got as it goes.
+fn verify(dev: Arc<dyn BlockDev>) {
+    let t = Instant::now();
+    let fs = open(dev, false).unwrap();
+    let mut said = 0;
+    let result = fs.scrub(&mut |done, total| {
+        let tenth = done * 10 / total.max(1);
+        if tenth > said {
+            said = tenth;
+            println!("checksums: {}0% after {:.0} s", tenth, t.elapsed().as_secs_f64());
+        }
+    });
+    match result {
+        Ok(rep) => {
+            let (gb, secs) = (rep.scanned_bytes as f64 / 1e9, t.elapsed().as_secs_f64());
+            println!("checksums: {gb:.1} GB verified in {secs:.0} s ({:.0} MB/s), {} errors", gb * 1000.0 / secs.max(0.001), rep.errors.len());
+            for e in rep.errors.iter().take(10) {
+                println!("  {}", plain(&FsError::Corrupt(e.clone())));
+            }
+        }
+        Err(e) => println!("checksums: the pass stopped: {}", plain(&e)),
+    }
+}
+
 #[test]
 #[ignore = "run by hand against a real volume, as administrator"]
 fn rehearse() {
@@ -425,6 +451,13 @@ fn rehearse() {
         let key = header.unlock(dev.as_ref(), pass.as_bytes()).expect("unlocking");
         dev = Arc::new(header.open(dev.clone(), &key).unwrap());
         println!("unlocked in {}", since(&clock));
+    }
+
+    // Checksums only: the volume as it is on the disk, with nothing written even in memory.
+    if std::env::var("NIXMOUNT_REHEARSE_SCRUB").is_ok_and(|v| v == "only") {
+        verify(dev);
+        assert!(overlay.blocks.lock().unwrap().is_empty());
+        return;
     }
 
     // Before: the whole volume, as it is on the disk.
@@ -592,17 +625,7 @@ fn rehearse() {
     println!("space in use: {} bytes before, {} after", before_info.total_bytes - before_info.free_bytes, after_info.total_bytes - after_info.free_bytes);
 
     if std::env::var_os("NIXMOUNT_REHEARSE_SCRUB").is_some() {
-        let t = Instant::now();
-        let fs = open(dev, false).unwrap();
-        match fs.scrub(&mut |_, _| {}) {
-            Ok(rep) => {
-                println!("checksums: {:.1} GB verified in {}, {} errors", rep.scanned_bytes as f64 / 1e9, since(&t), rep.errors.len());
-                for e in rep.errors.iter().take(10) {
-                    println!("  {}", plain(&FsError::Corrupt(e.clone())));
-                }
-            }
-            Err(e) => println!("checksums: the pass stopped: {}", plain(&e)),
-        }
+        verify(dev);
     }
     println!("nothing reached the disk; the whole rehearsal took {}", since(&clock));
 }
