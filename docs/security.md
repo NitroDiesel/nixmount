@@ -38,11 +38,14 @@ The service runs as SYSTEM, so its boundaries matter:
 - Messages are size-limited and decoded with a schema, not parsed by hand.
 - It runs from `Program Files`, not from wherever it was downloaded, and its path is quoted. A
   service binary in a user-writable folder would be a privilege-escalation hole.
-- `%ProgramData%\NixMount` decides what the service mounts, so it is open to SYSTEM and
-  Administrators only. Any user can create folders there, so setup keeps a folder it finds only
-  if its permissions show an earlier install locked it. Anything else is removed, without
-  following links, and the folder is created with its permissions already in place, so there
-  is no moment when someone else can write into it. Setup stops if it can't do that.
+- The settings decide what the service mounts, so they live in `settings` beside the installed
+  program, open to SYSTEM and Administrators only. Only administrators can create anything in
+  `Program Files`, so nobody else can make that folder first, hold a file open in it to stop
+  setup, or swap it for a link. It is created with its permissions already in place, so there
+  is no moment when someone else can write into it.
+- Versions up to 0.2.1 kept settings in `%ProgramData%\NixMount`, where any user can create
+  folders. Setup brings settings over from there only if the folder's permissions show an
+  earlier install locked it. A folder anyone else made is neither believed nor touched.
 - WinFsp's DLL is loaded by absolute path from the registry, which keeps DLL search-order attacks
   out of the process.
 

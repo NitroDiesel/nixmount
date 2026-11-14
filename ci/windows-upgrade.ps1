@@ -6,7 +6,9 @@ New-Item -ItemType Directory -Force $Out | Out-Null
 $Out = (Resolve-Path $Out).Path
 $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
 $arp = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\NixMount'
-$settings = "$env:ProgramData\NixMount\config.json"
+# Up to 0.2.1 settings lived in ProgramData; since then, beside the program.
+$oldSettings = "$env:ProgramData\NixMount\config.json"
+$settings = "$env:ProgramFiles\NixMount\settings\config.json"
 
 # The program is a GUI executable: PowerShell only waits for it when its output is piped.
 function Run($exe) {
@@ -42,11 +44,12 @@ try {
     Run $Old mount $image 'J:' --rw
     Check 'the last release serves the image' (Wait-For { Test-Path 'J:\hello.txt' })
     Set-Content 'J:\before-upgrade.txt' 'written before the upgrade'
-    $before = Get-Content $settings -Raw
+    $before = Get-Content (@($settings, $oldSettings) | Where-Object { Test-Path $_ } | Select-Object -First 1) -Raw
 
     Run $New install
     Check "the installed version is now $version" ((Get-ItemProperty $arp).DisplayVersion -eq $version)
     Check 'settings came through unchanged' ($before -eq (Get-Content $settings -Raw))
+    Check 'nothing is left where older versions kept settings' (-not (Test-Path (Split-Path $oldSettings)))
     Check 'the service is running' ((Get-Service NixMount).Status -eq 'Running')
     Check 'the installed program is the new one' ((Get-FileHash "$env:ProgramFiles\NixMount\nixmount.exe").Hash -eq (Get-FileHash $New).Hash)
     Check 'the remembered volume came back by itself' (Wait-For { Test-Path 'J:\hello.txt' })

@@ -1,5 +1,8 @@
 //! Saved state: which volumes mount automatically, and remembered image files.
-//! Lives in `%ProgramData%\NixMount`, writable only by administrators and SYSTEM.
+//!
+//! It lives in `settings` beside the installed program. Only administrators can create
+//! anything in `Program Files`, so nobody else can put a folder there first, hold it open, or
+//! swap it for a link, which a folder in `%ProgramData%` allowed.
 use crate::mounts::MountRequest;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -27,43 +30,38 @@ pub struct Config {
     pub images: Vec<PathBuf>,
 }
 
+const FILE: &str = "config.json";
+const TEMPORARY: &str = "config.tmp";
+
 fn dir() -> PathBuf {
+    crate::install::program_dir().join("settings")
+}
+
+/// Where versions up to 0.2.1 kept their settings.
+fn old_dir() -> PathBuf {
     let base = std::env::var_os("ProgramData").map_or_else(|| PathBuf::from(r"C:\ProgramData"), PathBuf::from);
     base.join("NixMount")
 }
 
-fn path() -> PathBuf {
-    dir().join("config.json")
-}
-
 impl Config {
     pub fn load() -> Config {
-        std::fs::read(path()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+        std::fs::read(dir().join(FILE)).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
     }
 
     /// Writes through a temporary file, so a crash can't leave half a config behind.
     pub fn save(&self) -> Result<(), String> {
         let d = dir();
-        if !d.exists() {
-            secure_directory(false)?;
-        }
-        let tmp = d.join("config.tmp");
+        prepare()?;
+        let tmp = d.join(TEMPORARY);
         let body = serde_json::to_vec_pretty(self).map_err(|e| e.to_string())?;
         std::fs::write(&tmp, body).map_err(|e| e.to_string())?;
-        std::fs::rename(&tmp, path()).map_err(|e| e.to_string())
+        std::fs::rename(&tmp, d.join(FILE)).map_err(|e| e.to_string())
     }
 }
 
-/// Changes one path's permissions, never a tree: `/T` walks through junctions, so a planted
-/// one would aim this at any file on the machine. `/L` likewise acts on a link, not its target.
-fn icacls(path: &Path, args: &[&str]) -> Result<(), String> {
-    let tool = crate::install::system_dir().join("icacls.exe");
-    let ok = std::process::Command::new(tool).arg(path).args(args).arg("/L").output().is_ok_and(|o| o.status.success());
-    ok.then_some(()).ok_or_else(|| format!("could not secure {}", path.display()))
-}
-
 /// The settings folder's permissions: owned by Administrators, full control for SYSTEM and
-/// Administrators that everything inside inherits, and nothing inherited from above.
+/// Administrators that everything inside inherits, and nothing inherited from above. What the
+/// service mounts is nobody else's to read, let alone change.
 const LOCKED: &str = "O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)";
 
 /// Whether a folder with these permissions, in SDDL, belongs to SYSTEM or Administrators and
@@ -74,8 +72,8 @@ fn only_admins(sddl: &str) -> bool {
     matches!(owner, "O:BA" | "O:SY") && dacl.contains('(') && aces.all(|sid| matches!(sid, Some("SY" | "BA")))
 }
 
-/// Whether `d` is a folder an earlier install locked, rather than one anybody could have
-/// put in its place since: a real folder, not a link, that only administrators control.
+/// Whether `d` is a folder an install locked, rather than one anybody could have put in its
+/// place: a real folder, not a link, that only administrators control.
 fn locked_down(d: &Path) -> bool {
     use std::os::windows::fs::MetadataExt;
     const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
@@ -101,8 +99,7 @@ fn locked_down(d: &Path) -> bool {
     }
 }
 
-/// Creates the folder with its permissions already in place, so there is never a moment when
-/// someone else can write into it. Fails if something is already there.
+/// Creates the folder with its permissions already in place.
 fn create_locked(d: &Path) -> Result<(), String> {
     let (sddl, path) = (crate::wide(LOCKED), crate::wide(&d.to_string_lossy()));
     let mut sd = null_mut();
@@ -122,30 +119,44 @@ fn create_locked(d: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Makes sure the configuration folder is one only SYSTEM and Administrators can write, since
-/// it decides what the service mounts. Any user can create folders in `%ProgramData%`, so a
-/// folder found there is kept only if `keep_settings` asks and its permissions show that an
-/// earlier install locked it. Anything else goes, whatever it holds, and the install stops if
-/// it can't be made to.
-pub fn secure_directory(keep_settings: bool) -> Result<(), String> {
+/// Makes sure the settings folder exists. The first time, settings an earlier version saved
+/// are brought over.
+pub fn prepare() -> Result<(), String> {
     let d = dir();
-    if keep_settings && locked_down(&d) {
-        // Versions before 0.1.2 left this file with no permissions at all when upgrading.
-        // Inheriting from the folder brings it back.
-        let _ = icacls(&path(), &["/reset"]);
+    if d.exists() {
         return Ok(());
     }
-    if std::fs::symlink_metadata(&d).is_ok() {
-        icacls(&d, &["/setowner", "*S-1-5-32-544"])?;
-        icacls(&d, &["/grant", "*S-1-5-32-544:(F)"])?;
-        // This removes links rather than following them. Something inside that refuses to go
-        // moves aside with the whole folder: out of the way is enough.
-        if std::fs::remove_dir_all(&d).is_err() {
-            let aside = d.with_extension(format!("removed-{}", std::process::id()));
-            std::fs::rename(&d, aside).map_err(|e| format!("could not clear {}: {e}", d.display()))?;
-        }
+    if let Some(program) = d.parent() {
+        std::fs::create_dir_all(program).map_err(|e| e.to_string())?;
     }
-    create_locked(&d)
+    create_locked(&d)?;
+    bring_over(&old_dir(), &d);
+    Ok(())
+}
+
+/// Moves settings from where versions up to 0.2.1 kept them. Any user could create that
+/// folder, so it is believed only if its permissions show that an install locked it, and
+/// otherwise left exactly as it is: it isn't ours.
+fn bring_over(old: &Path, new: &Path) {
+    if !locked_down(old) {
+        return;
+    }
+    let _ = std::fs::copy(old.join(FILE), new.join(FILE));
+    remove_from(old);
+}
+
+fn remove_from(d: &Path) {
+    let _ = std::fs::remove_file(d.join(FILE));
+    let _ = std::fs::remove_file(d.join(TEMPORARY));
+    let _ = std::fs::remove_dir(d);
+}
+
+/// Deletes saved settings when uninstalling.
+pub fn remove() {
+    remove_from(&dir());
+    if locked_down(&old_dir()) {
+        remove_from(&old_dir());
+    }
 }
 
 #[cfg(test)]
@@ -166,12 +177,17 @@ mod tests {
         assert!(!only_admins("O:BA"));
         assert!(!locked_down(&std::env::temp_dir()));
     }
-}
 
-/// Deletes saved settings when uninstalling.
-pub fn remove() {
-    let d = dir();
-    let _ = std::fs::remove_file(path());
-    let _ = std::fs::remove_file(d.join("config.tmp"));
-    let _ = std::fs::remove_dir(d);
+    /// A folder anybody could have made is neither believed nor touched.
+    #[test]
+    fn settings_in_an_unlocked_folder_stay_where_they_are() {
+        let base = std::env::temp_dir().join(format!("nixmount-settings-{}", std::process::id()));
+        let (old, new) = (base.join("old"), base.join("new"));
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::create_dir_all(&new).unwrap();
+        std::fs::write(old.join(FILE), r#"{"images":["C:\\planted.img"]}"#).unwrap();
+        bring_over(&old, &new);
+        assert!(old.join(FILE).exists() && !new.join(FILE).exists());
+        std::fs::remove_dir_all(&base).unwrap();
+    }
 }

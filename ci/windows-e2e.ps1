@@ -48,23 +48,29 @@ function Wait-For($condition) {
 
 Check 'the machine starts without the driver' (-not (Test-Path $driver))
 
-# Any user can create the settings folder before setup runs, so nothing in it can be trusted:
-# not its settings or its permissions, and not a junction aimed at something worth damaging.
-$settings = "$env:ProgramData\NixMount"
+# Versions up to 0.2.1 kept settings in %ProgramData%\NixMount, a folder any user could create
+# first. One planted there must be neither believed nor touched: not its settings, and not a
+# junction aimed at something worth damaging.
+$planted = "$env:ProgramData\NixMount"
 $decoy = "$Out\decoy"
-New-Item -ItemType Directory -Force $settings, $decoy | Out-Null
-Set-Content "$settings\config.json" '{"automounts":[],"images":["C:\\planted.img"]}'
+New-Item -ItemType Directory -Force $planted, $decoy | Out-Null
+Set-Content "$planted\config.json" '{"automounts":[],"images":["C:\\planted.img"]}'
 Set-Content "$decoy\private.txt" 'private'
 icacls "$decoy\private.txt" /inheritance:r /grant '*S-1-5-18:F' '*S-1-5-32-544:F' '*S-1-5-19:R' | Out-Null
-New-Item -ItemType Junction -Path "$settings\inner" -Target $decoy | Out-Null
-icacls $settings /grant '*S-1-5-32-545:(OI)(CI)F' | Out-Null
+New-Item -ItemType Junction -Path "$planted\inner" -Target $decoy | Out-Null
+icacls $planted /grant '*S-1-5-32-545:(OI)(CI)F' | Out-Null
 $private = (Get-Acl "$decoy\private.txt").Sddl
+# Holding a file open in it used to be enough to make setup fail.
+$held = [IO.File]::Open("$planted\config.json", 'Open', 'Read', 'None')
 
 NixMount install
-Check 'setup clears out a settings folder planted before it ran' (@(Get-ChildItem $settings -Force).Count -eq 0)
+$settings = "$program\settings"
+Check 'setup is not stopped by a file held open in a planted folder' ((Get-Service NixMount).Status -eq 'Running')
+Check 'setup does not believe settings planted before it ran' (-not ((Get-Content "$settings\config.json" -Raw -ErrorAction SilentlyContinue) -match 'planted'))
+Check 'setup leaves a planted folder as it found it' ((Test-Path "$planted\config.json") -and (Test-Path "$planted\inner"))
 Check 'setup leaves what a planted junction points at alone' ((Test-Path "$decoy\private.txt") -and (Get-Acl "$decoy\private.txt").Sddl -eq $private)
-Check 'ordinary users cannot change the settings' (-not ((icacls $settings | Out-String) -match 'Users'))
-Remove-Item -Recurse $decoy
+Check 'ordinary users cannot read or change the settings' (-not ((icacls $settings | Out-String) -match 'Users'))
+$held.Close()
 Check 'setup installed the bundled driver' (Test-Path $driver)
 Check 'setup started the service' ((Get-Service NixMount).Status -eq 'Running')
 Check 'setup installed to Program Files' (Test-Path "$program\nixmount.exe")
@@ -275,4 +281,8 @@ Check 'uninstall removed the bundled driver' (-not (Test-Path $driver))
 Check 'uninstall removed the program' (-not (Test-Path $program))
 Check 'uninstall removed the Start menu entry' (-not (Test-Path $link))
 Check 'uninstall removed the installed apps entry' (-not (Test-Path $arp))
+Check 'uninstall leaves a planted folder alone too' ((Test-Path "$planted\config.json") -and (Test-Path "$decoy\private.txt"))
+# Unlink the junction before deleting, so nothing follows it into the decoy.
+[IO.Directory]::Delete("$planted\inner")
+Remove-Item -Recurse $planted, $decoy
 'All end-to-end checks passed.'

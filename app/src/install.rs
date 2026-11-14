@@ -43,9 +43,10 @@ pub fn relaunch_elevated(args: &str) -> bool {
     r as isize > 32
 }
 
-fn program_dir() -> Result<PathBuf, String> {
+/// Where the program is installed. Only administrators can create anything there.
+pub fn program_dir() -> PathBuf {
     let base = std::env::var_os("ProgramW6432").or_else(|| std::env::var_os("ProgramFiles"));
-    Ok(PathBuf::from(base.ok_or("no Program Files directory")?).join("NixMount"))
+    base.map_or_else(|| PathBuf::from(r"C:\Program Files"), PathBuf::from).join("NixMount")
 }
 
 /// Windows' own system folder, asked of Windows: tools run elevated must not come from a
@@ -161,14 +162,13 @@ fn create_shortcut(exe: &Path) {
 
 /// Installs or upgrades everything. Safe to run again: each step keeps what is already right.
 pub fn install() -> Result<(), String> {
-    let dir = program_dir()?;
+    let dir = program_dir();
     let dest = dir.join("nixmount.exe");
     let this = std::env::current_exe().map_err(|e| e.to_string())?;
-    // Only an administrator can have put the program there, so settings beside it are ours.
-    config::secure_directory(dest.exists())?;
     // An upgrade has to stop the running copy. Its mounts close cleanly on the way.
     service::stop()?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    config::prepare()?;
     if this != dest {
         if let Err(e) = replace_program(&this, &dest) {
             // Whatever is installed is better running than not.
@@ -199,7 +199,7 @@ fn replace_program(from: &Path, to: &Path) -> Result<(), String> {
 /// Removes everything `install` added, including WinFsp if NixMount was what installed it.
 /// If another program brought WinFsp, it stays.
 pub fn uninstall() -> Result<(), String> {
-    let dir = program_dir()?;
+    let dir = program_dir();
     service::unregister()?;
     let _ = std::fs::remove_file(start_menu_link());
     let key = wide(UNINSTALL_KEY);
