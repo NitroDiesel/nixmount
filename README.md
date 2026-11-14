@@ -19,7 +19,7 @@ can't crash Windows.
 | Mounting read-only | May replay the journal to disk | Never writes: recovery happens in memory |
 | Encrypted (LUKS) volumes | Not supported | Unlocked with their passphrase |
 | Secure Boot | Workarounds or a paid signature | Nothing to sign |
-| Source | About 220,000 lines of C and C++, with bundled libraries | About 15,000 lines of Rust |
+| Source | About 220,000 lines of C and C++, with bundled libraries | About 18,000 lines of Rust |
 | Memory | Kernel pool | 5 MB for the interface, 2 MB for the idle service |
 
 ## Getting started

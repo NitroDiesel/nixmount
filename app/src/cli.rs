@@ -292,6 +292,15 @@ fn export(fs: &dyn Filesystem, ino: fscore::Ino, dest: &Path, depth: u32, count:
     Ok(())
 }
 
+/// How many files were copied out, in words.
+pub fn exported(n: u64) -> String {
+    if n == 1 {
+        "Exported 1 file".into()
+    } else {
+        format!("Exported {n} files")
+    }
+}
+
 pub fn export_path(fs: &dyn Filesystem, path: &str, dest: &Path) -> Result<u64, String> {
     let ino = resolve(fs, path).map_err(|e| e.to_string())?;
     let mut count = 0;
@@ -356,7 +365,7 @@ pub fn run(mut args: Vec<String>) -> Result<(), String> {
         "export" => {
             let fs = open_for_reading(&arg(0)?)?;
             let n = export_path(fs.as_ref(), &arg(1)?, &PathBuf::from(arg(2)?))?;
-            println!("Exported {n} files.");
+            println!("{}.", exported(n));
         }
         "mount" => {
             let fg = take_flag(&mut args, "--foreground");

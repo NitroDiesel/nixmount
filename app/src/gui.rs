@@ -733,7 +733,7 @@ impl App {
         self.set_busy("Exporting…");
         let w = self.wnd();
         std::thread::spawn(move || match cli::export_path(fs.as_ref(), &src, &dest) {
-            Ok(n) => w.post(Msg::Done { note: Some(format!("Exported {n} files to {}", dest.display())) }),
+            Ok(n) => w.post(Msg::Done { note: Some(format!("{} to {}", cli::exported(n), dest.display())) }),
             Err(e) => w.post(Msg::Failed(e)),
         });
     }
