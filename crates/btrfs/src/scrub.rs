@@ -5,6 +5,9 @@ use crate::*;
 use fscore::{CheckReport, Le};
 use std::collections::HashSet;
 
+/// Sectors read at once when checking data: a megabyte at the usual sector size.
+const RUN: usize = 256;
+
 impl Fs {
     /// Writes one copy of a logical range, used to repair a single mirror in place.
     fn write_mirror(&self, logical: u64, data: &[u8], mirror: usize) -> Result<()> {
@@ -90,21 +93,64 @@ impl Fs {
         }
         let (ss, cs) = (self.sectorsize, self.csum_size);
         let csums = self.tree(CSUM_TREE)?;
-        let mut items: Vec<(u64, Vec<u8>)> = vec![];
-        self.scan(csums, Key::new(CSUM_OBJECTID, K_EXTENT_CSUM, 0), &mut |k, d| {
-            if k.obj == CSUM_OBJECTID && k.ty == K_EXTENT_CSUM {
-                items.push((k.off, d.to_vec()));
+        // Checksums are taken a part at a time: a large volume has hundreds of megabytes.
+        let mut next = Some(0);
+        while let Some(from) = next.take() {
+            let mut items: Vec<(u64, Vec<u8>)> = vec![];
+            let mut held = 0;
+            self.scan(csums, Key::new(CSUM_OBJECTID, K_EXTENT_CSUM, from), &mut |k, d| {
+                if k.obj == CSUM_OBJECTID && k.ty == K_EXTENT_CSUM {
+                    held += d.len();
+                    items.push((k.off, d.to_vec()));
+                    next = Some(k.off + 1);
+                }
+                Ok(held < 1 << 20)
+            })?;
+            if items.is_empty() {
+                break;
             }
-            Ok(true)
-        })?;
-        for (start, sums) in items {
-            for (i, sum) in sums.chunks(cs).enumerate() {
-                let at = start + (i * ss) as u64;
-                self.scrub_range(at, ss, &|b| self.csum_matches(b, sum), &mut rep)?;
+            for (start, sums) in items {
+                let mut done = 0;
+                while done < sums.len() / cs {
+                    let at = start + (done * ss) as u64;
+                    let c = self.chunk_at(at)?;
+                    let room = ((c.start + c.len - at) / ss as u64).max(1) as usize;
+                    let n = (sums.len() / cs - done).min(RUN).min(room);
+                    self.scrub_sectors(at, &sums[done * cs..(done + n) * cs], &mut rep)?;
+                    done += n;
+                }
+                progress(rep.scanned_bytes.min(total), total);
             }
-            progress(rep.scanned_bytes.min(total), total);
         }
         progress(total, total);
         Ok(rep)
+    }
+
+    /// Checks a run of sectors inside one chunk against their checksums, reading each copy
+    /// in one go. Only a sector that fails, or a run that won't read, is then gone over
+    /// copy by copy, which is where a repair happens.
+    fn scrub_sectors(&self, logical: u64, sums: &[u8], rep: &mut CheckReport) -> Result<()> {
+        let (ss, cs) = (self.sectorsize, self.csum_size);
+        let c = self.chunk_at(logical)?;
+        let mirrors = if c.is_parity() { 1 } else { c.mirrors() };
+        let mut bad = vec![false; sums.len() / cs];
+        let mut buf = vec![0u8; bad.len() * ss];
+        for m in 0..mirrors {
+            if self.read_mirror(logical, &mut buf, m).is_err() {
+                bad.fill(true);
+                break;
+            }
+            for (i, (sector, sum)) in buf.chunks(ss).zip(sums.chunks(cs)).enumerate() {
+                bad[i] |= !self.csum_matches(sector, sum);
+            }
+        }
+        for (i, sum) in sums.chunks(cs).enumerate() {
+            if bad[i] {
+                self.scrub_range(logical + (i * ss) as u64, ss, &|b| self.csum_matches(b, sum), rep)?;
+            } else {
+                rep.scanned_bytes += (ss * mirrors) as u64;
+            }
+        }
+        Ok(())
     }
 }

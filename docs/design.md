@@ -135,6 +135,7 @@ independent judges. Each runs in CI on every push.
 | Power-cut simulator | Replays the write log to sampled points, losing a random part of what wasn't flushed. Recovery must land exactly on a commit boundary. On ext4, read-only recovery must also match a real replay without writing a byte |
 | Reference model | Every random operation is mirrored in memory and compared with what the engine returns |
 | Corrupted images | Random damage must give errors, never a panic or hang. On Btrfs the damage is re-signed with valid checksums, as an attacker would |
+| Planted damage | Scrub must find a damaged sector or tree block and name it, and rewrite it when a good copy exists, after which `btrfs check` finds every checksum in order |
 | Full volumes | Filling a volume must fail cleanly, and still pass `e2fsck` or `btrfs check` afterwards |
 | Windows end to end | The real service, WinFsp, drive letters and raw partitions on a Windows runner, with the resulting images then checked by `e2fsck` and `btrfs check` on Linux |
 | cryptsetup | LUKS volumes in five configurations made by `cryptsetup` and filled by the kernel are unlocked, read and edited here, then decrypted by Linux and checked as above. cryptsetup's own test images must decrypt to the checksums its test suite expects |

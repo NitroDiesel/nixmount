@@ -220,6 +220,43 @@ fn btrfs_raid1() {
     round("btrfs-raid1", 2, &["-d", "raid1", "-m", "raid1"]);
 }
 
+/// A bad sector on one device of a mirror is rewritten from the other, and `btrfs check`
+/// then finds every checksum in order.
+#[test]
+fn scrub_mends_a_mirror() {
+    if !have_tools() {
+        return;
+    }
+    let src = out_dir().join("btrfs-mend.src");
+    seed_tree(&src);
+    let imgs = make_images("btrfs-mend", 2, 512 << 20);
+    mkfs(&imgs, &src, &["-d", "raid1", "-m", "raid1"]);
+    let want = host_tree(&src);
+    let fs = open(&imgs, RW);
+    populate(&fs, &want);
+    fs.unmount().unwrap();
+    drop(fs);
+
+    // A stretch of the large file, found on the first device and damaged there only.
+    let Content::File(big) = &want["/big.bin"] else { panic!("big.bin is a file") };
+    let stretch = &big[1 << 20..(1 << 20) + 64];
+    let mut first = std::fs::read(&imgs[0]).unwrap();
+    let at = first.windows(64).position(|w| w == stretch).expect("the file is on the first device");
+    first[at] ^= 1;
+    std::fs::write(&imgs[0], &first).unwrap();
+
+    let fs = open(&imgs, RW);
+    let rep = fs.scrub(&mut |_, _| {}).unwrap();
+    assert!(rep.errors.is_empty(), "{:?}", rep.errors);
+    assert_eq!(rep.repaired, 1);
+    fs.unmount().unwrap();
+    drop(fs);
+    assert_eq!(std::fs::read(&imgs[0]).unwrap()[at..at + 64], *stretch);
+    check_all(&imgs, "btrfs-mend: after scrub");
+    assert_same(&walk(&open(&imgs, RO)).unwrap(), &want, "btrfs-mend: reread");
+    let _ = std::fs::remove_dir_all(&src);
+}
+
 #[test]
 fn btrfs_raid0() {
     round("btrfs-raid0", 2, &["-d", "raid0", "-m", "raid1"]);
