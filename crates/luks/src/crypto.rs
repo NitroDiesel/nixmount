@@ -81,7 +81,7 @@ pub fn argon2(id: bool, passphrase: &[u8], salt: &[u8], time: u32, memory_kib: u
     let alg = if id { Algorithm::Argon2id } else { Algorithm::Argon2i };
     // Lanes run side by side, as cryptsetup tuned them to. The pool is this call's own, so no
     // threads outlive the unlock.
-    let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).min(lanes.max(1) as usize);
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get()).min(lanes as usize);
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(threads)
         .build()
@@ -123,12 +123,12 @@ enum Aes {
 
 impl Aes {
     fn new(key: &[u8]) -> Result<Aes> {
-        let bad = |_| FsError::Unsupported("invalid AES key".into());
+        let bad = || FsError::Unsupported("invalid AES key".into());
         Ok(match key.len() {
-            16 => Aes::A128(Aes128::new_from_slice(key).map_err(bad)?),
-            24 => Aes::A192(Aes192::new_from_slice(key).map_err(bad)?),
-            32 => Aes::A256(Aes256::new_from_slice(key).map_err(bad)?),
-            n => return Err(FsError::Unsupported(format!("{}-bit AES-XTS keys aren't supported", n * 16))),
+            16 => Aes::A128(Aes128::new_from_slice(key).map_err(|_| bad())?),
+            24 => Aes::A192(Aes192::new_from_slice(key).map_err(|_| bad())?),
+            32 => Aes::A256(Aes256::new_from_slice(key).map_err(|_| bad())?),
+            _ => return Err(bad()),
         })
     }
 

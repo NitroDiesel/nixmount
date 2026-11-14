@@ -46,8 +46,8 @@ passphrase is only used to unlock and is never saved, which is also why encrypte
 mount automatically. Type the same characters you type at Linux's prompt. If Linux uses a
 different keyboard layout, a key may produce another character on Windows.
 
-From the command line, commands that open an encrypted volume ask for its passphrase, or read
-the first line of piped input.
+From the command line, commands that open an encrypted volume ask for its passphrase in a small
+window of their own, or read the first line of piped input.
 
 ## Write to a volume
 

@@ -39,9 +39,10 @@ The service runs as SYSTEM, so its boundaries matter:
 - It runs from `Program Files`, not from wherever it was downloaded, and its path is quoted. A
   service binary in a user-writable folder would be a privilege-escalation hole.
 - `%ProgramData%\NixMount` decides what the service mounts, so it is open to SYSTEM and
-  Administrators only. Any user can create folders there, so a first install deletes whatever it
-  finds, without following links, and stops if it can't. An upgrade keeps the settings, because
-  only an administrator can have put the program in place.
+  Administrators only. Any user can create folders there, so setup keeps a folder it finds only
+  if its permissions show an earlier install locked it. Anything else is removed, without
+  following links, and the folder is created with its permissions already in place, so there
+  is no moment when someone else can write into it. Setup stops if it can't do that.
 - WinFsp's DLL is loaded by absolute path from the registry, which keeps DLL search-order attacks
   out of the process.
 
@@ -54,7 +55,10 @@ The service runs as SYSTEM, so its boundaries matter:
 - A key is checked against the volume's own digest before use, so a wrong one can't turn writes
   into garbage.
 - Header values from a hostile disk are bounded: every offset is checked against the device, and
-  key derivation asking for more than 4 GiB of memory is refused instead of attempted.
+  key derivation asking for more than 4 GiB of memory, or for far more work than a real volume
+  does, is refused instead of attempted.
+- A passphrase typed for the command line goes into a window of NixMount's own, never the
+  console it was started from, where the shell would read it too.
 - Once mounted, an encrypted volume is as readable to signed-in users as any other mount.
 
 ## Setup

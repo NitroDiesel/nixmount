@@ -25,9 +25,38 @@ const PIPE: &str = r"\\.\pipe\nixmount";
 const MAX_MESSAGE: usize = 4 << 20;
 
 /// Key material in a message. It is wiped when dropped and never printed.
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize)]
 #[serde(transparent)]
 pub struct Secret(Vec<u8>);
+
+/// The longest key any supported cipher takes.
+const MAX_KEY: usize = 64;
+
+impl<'de> Deserialize<'de> for Secret {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Secret, D::Error> {
+        struct Bytes;
+        impl<'de> serde::de::Visitor<'de> for Bytes {
+            type Value = Secret;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a volume key")
+            }
+
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Secret, A::Error> {
+                // Sized once: a buffer that grows leaves its earlier, unwiped copies behind.
+                let mut key = Secret(Vec::with_capacity(MAX_KEY));
+                while let Some(b) = seq.next_element()? {
+                    if key.0.len() == MAX_KEY {
+                        return Err(serde::de::Error::custom("the key is too long"));
+                    }
+                    key.0.push(b);
+                }
+                Ok(key)
+            }
+        }
+        d.deserialize_seq(Bytes)
+    }
+}
 
 impl Secret {
     pub fn new(key: &luks::Key) -> Secret {
@@ -132,12 +161,12 @@ impl Pipe {
         Ok(())
     }
 
-    /// Messages can carry a volume key, so their encoded form is wiped once used.
+    /// Messages can carry a volume key, so their encoded form is wiped once used. The buffer
+    /// starts larger than any request that holds one, so it never moves and leaves a copy.
     pub fn send<T: Serialize>(&self, msg: &T) -> std::io::Result<()> {
-        let mut body = serde_json::to_vec(msg)?;
-        let r = self.write_all(&(body.len() as u32).to_le_bytes()).and_then(|()| self.write_all(&body));
-        body.zeroize();
-        r
+        let mut body = zeroize::Zeroizing::new(Vec::with_capacity(64 << 10));
+        serde_json::to_writer(&mut *body, msg)?;
+        self.write_all(&(body.len() as u32).to_le_bytes()).and_then(|()| self.write_all(&body))
     }
 
     pub fn receive<T: for<'a> Deserialize<'a>>(&self) -> std::io::Result<T> {
@@ -243,5 +272,20 @@ pub fn serve(handler: impl Fn(Request) -> Response + Send + Sync + 'static) -> s
                 DisconnectNamedPipe(p.0);
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_key_crosses_intact_and_an_oversized_one_is_refused() {
+        let key = luks::Key::from_bytes((0..64).collect());
+        let wire = serde_json::to_string(&Secret::new(&key)).unwrap();
+        let back: Secret = serde_json::from_str(&wire).unwrap();
+        assert_eq!(back.into_key().as_bytes(), key.as_bytes());
+        let long = serde_json::to_string(&vec![0u8; 65]).unwrap();
+        assert!(serde_json::from_str::<Secret>(&long).is_err());
     }
 }

@@ -202,10 +202,15 @@ fn handle(r: Request) -> Response {
             s.mounts.mount(mount, key.map(Secret::into_key)).map_or_else(Response::Error, Response::Mounted)
         }
         Request::Unmount { point } => {
+            // Dismissed before it is detached, or an automount running now would see a
+            // remembered volume that is neither mounted nor dismissed, and bring it back.
             let uuid = s.mounts.uuid_at(&point);
+            if let Some(u) = &uuid {
+                dismissed().insert(u.clone());
+            }
             let result = s.mounts.unmount(&point);
-            if let (Ok(()), Some(u)) = (&result, uuid) {
-                dismissed().insert(u);
+            if let (Err(_), Some(u)) = (&result, &uuid) {
+                dismissed().remove(u);
             }
             done(result)
         }

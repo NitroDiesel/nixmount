@@ -102,26 +102,21 @@ impl Mounts {
         Ok(status)
     }
 
-    /// Detaches the drive letter first, so nothing can write while the volume closes.
-    pub fn unmount(&self, point: &str) -> Result<(), String> {
+    /// Takes the first mount `which` picks out of the registry.
+    fn take(&self, which: impl Fn(&Entry) -> bool) -> Option<Entry> {
         let mut l = self.lock();
-        let i = l
-            .iter()
-            .position(|e| e.mount.mount_point.eq_ignore_ascii_case(point))
-            .ok_or("nothing is mounted there")?;
-        let e = l.remove(i);
-        drop(l);
-        let fs = e.fs.clone();
-        drop(e);
-        fs.unmount().map_err(|e| e.to_string())
+        let i = l.iter().position(which)?;
+        Some(l.remove(i))
+    }
+
+    pub fn unmount(&self, point: &str) -> Result<(), String> {
+        close(self.take(|e| e.mount.mount_point.eq_ignore_ascii_case(point)).ok_or("nothing is mounted there")?)
     }
 
     pub fn unmount_all(&self) {
         let all: Vec<Entry> = std::mem::take(&mut *self.lock());
         for e in all {
-            let fs = e.fs.clone();
-            drop(e);
-            let _ = fs.unmount();
+            let _ = close(e);
         }
     }
 
@@ -129,10 +124,13 @@ impl Mounts {
     /// handle, because a disk pulled and put straight back has its path again while this
     /// handle stays dead, and only mounting afresh gets a working one.
     pub fn prune_missing(&self) {
-        let open: Vec<_> = self.lock().iter().map(|e| (e.mount.mount_point.clone(), e.devs.clone())).collect();
-        for (point, devs) in open {
+        let open: Vec<_> = self.lock().iter().map(|e| (e.fs.clone(), e.devs.clone())).collect();
+        for (fs, devs) in open {
             if devs.iter().any(|d| d.read_at(0, &mut [0; 512]).is_err()) {
-                let _ = self.unmount(&point);
+                // The mount that was tested, not whatever holds its drive letter by now.
+                if let Some(e) = self.take(|e| Arc::ptr_eq(&e.fs, &fs)) {
+                    let _ = close(e);
+                }
             }
         }
     }
@@ -200,6 +198,13 @@ impl Mounts {
             }
         });
     }
+}
+
+/// Detaches the drive letter first, so nothing can write while the volume closes.
+fn close(e: Entry) -> Result<(), String> {
+    let fs = e.fs.clone();
+    drop(e);
+    fs.unmount().map_err(|e| e.to_string())
 }
 
 fn status_of(e: &Entry) -> MountStatus {

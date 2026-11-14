@@ -53,6 +53,11 @@ jobs:
         env:
           NIXMOUNT_MSI_LOG: ${{ github.workspace }}e2emsi.log
         run: ci/windows-e2e.ps1 -Exe (Resolve-Path target/release/nixmount.exe).Path -Out e2e
+      - name: Upgrading from the last release keeps settings and an open mount
+        shell: pwsh
+        run: |
+          Invoke-WebRequest https://github.com/NitroDiesel/nixmount/releases/latest/download/NixMount-Setup.exe -OutFile last-release.exe
+          ci/windows-upgrade.ps1 -Old (Resolve-Path last-release.exe).Path -New (Resolve-Path target/release/nixmount.exe).Path -Out upgrade
       - name: The bundled installer is the official, unmodified release
         shell: pwsh
         run: |

@@ -68,6 +68,14 @@ pub struct Header {
 }
 
 const LUKS1_ACTIVE: u32 = 0x00AC_71F3;
+/// LUKS2 allows this many keyslots, and no more digests than keyslots.
+const MAX_SLOTS: usize = 32;
+/// The longest digest any supported hash produces.
+const MAX_DIGEST: usize = 64;
+/// Key-derivation work a header may ask for, summed over its keyslots and digests: PBKDF2
+/// iterations, and Argon2 passes times KiB of memory. Real volumes are tuned to a second or
+/// two per keyslot. This allows minutes, and stops a crafted header from asking for days.
+const MAX_WORK: u64 = 1 << 28;
 /// LUKS2 stores its header twice; the copy sits at one of these offsets.
 const LUKS2_SIZES: [u64; 9] = [0x4000, 0x8000, 0x1_0000, 0x2_0000, 0x4_0000, 0x8_0000, 0x10_0000, 0x20_0000, 0x40_0000];
 
@@ -135,7 +143,25 @@ pub fn read(dev: &dyn BlockDev) -> Result<Header> {
             return Err(bad("a keyslot lies outside the device"));
         }
     }
+    check_work(&h)?;
     Ok(h)
+}
+
+/// Refuses a header whose key derivation would cost more than any real volume's.
+fn check_work(h: &Header) -> Result<()> {
+    let mut pbkdf2 = h.digests.iter().fold(0u64, |n, d| n.saturating_add(d.iterations as u64));
+    let mut argon2 = 0u64;
+    for s in &h.slots {
+        match &s.kdf {
+            Kdf::Pbkdf2 { iterations, .. } => pbkdf2 = pbkdf2.saturating_add(*iterations as u64),
+            Kdf::Argon2 { time, memory_kib, .. } => argon2 = argon2.saturating_add(*time as u64 * *memory_kib as u64),
+        }
+    }
+    let long = h.digests.iter().any(|d| d.value.len() > MAX_DIGEST);
+    if h.slots.len() > MAX_SLOTS || h.digests.len() > MAX_SLOTS || long || pbkdf2 > MAX_WORK || argon2 > MAX_WORK {
+        return Err(FsError::Unsupported("this volume asks for more key-derivation work than any real one does".into()));
+    }
+    Ok(())
 }
 
 fn luks1(b: &[u8]) -> Result<Header> {
@@ -305,49 +331,12 @@ fn luks2(dev: &dyn BlockDev) -> Result<Header> {
     for (id, s) in field(j, "keyslots")?.as_object().ok_or_else(|| bad("keyslots"))? {
         // A slot that can't be used, or isn't understood, is passed over: another may work.
         let Some(digest) = digest_slots.iter().position(|d| d.contains(id)) else { continue };
-        if s.get("type").and_then(Value::as_str) != Some("luks2") {
-            continue;
-        }
-        let priority = s.get("priority").and_then(num).unwrap_or(1).min(2) as u8;
-        if priority == 0 {
-            continue;
-        }
-        let (Ok(af), Ok(area), Ok(kdf)) = (field(s, "af"), field(s, "area"), field(s, "kdf")) else { continue };
-        if string(af, "type")? != "luks1" || string(area, "type")? != "raw" {
-            continue;
-        }
-        let kdf = match string(kdf, "type")? {
-            "pbkdf2" => Kdf::Pbkdf2 {
-                hash: Hash::parse(string(kdf, "hash")?)?,
-                iterations: small(number(kdf, "iterations")?, "iterations")?.max(1),
-                salt: base64(kdf, "salt")?,
-            },
-            t @ ("argon2i" | "argon2id") => Kdf::Argon2 {
-                id: t == "argon2id",
-                time: small(number(kdf, "time")?, "time")?,
-                memory_kib: small(number(kdf, "memory")?, "memory")?,
-                lanes: small(number(kdf, "cpus")?, "cpus")?,
-                salt: base64(kdf, "salt")?,
-            },
-            _ => continue,
-        };
-        let size = check_key(&spec, number(s, "key_size")? as usize)?;
+        let Ok(Some((slot, size))) = keyslot(id, s, &spec, digest) else { continue };
         if key_size != 0 && key_size != size {
             return Err(bad("keyslots disagree about the key size"));
         }
         key_size = size;
-        let area_spec = Spec::parse(string(area, "encryption")?)?;
-        slots.push(Slot {
-            id: id.parse().unwrap_or(u32::MAX),
-            priority,
-            kdf,
-            af_hash: Hash::parse(string(af, "hash")?)?,
-            stripes: check_stripes(number(af, "stripes")?)?,
-            area_offset: number(area, "offset")?,
-            area_key: check_key(&area_spec, number(area, "key_size")? as usize)?,
-            area_spec,
-            digest,
-        });
+        slots.push(slot);
     }
     if slots.is_empty() {
         return Err(FsError::Unsupported("this volume has no passphrase keyslot that can be used".into()));
@@ -363,4 +352,46 @@ fn luks2(dev: &dyn BlockDev) -> Result<Header> {
         slots,
         digests,
     })
+}
+
+/// One LUKS2 keyslot and the size of the volume key it holds. None is a kind of slot that is
+/// not for passphrases, such as one a TPM or security key unlocks.
+fn keyslot(id: &str, s: &Value, spec: &Spec, digest: usize) -> Result<Option<(Slot, usize)>> {
+    let priority = s.get("priority").and_then(num).unwrap_or(1).min(2) as u8;
+    if s.get("type").and_then(Value::as_str) != Some("luks2") || priority == 0 {
+        return Ok(None);
+    }
+    let (af, area, kdf) = (field(s, "af")?, field(s, "area")?, field(s, "kdf")?);
+    if string(af, "type")? != "luks1" || string(area, "type")? != "raw" {
+        return Ok(None);
+    }
+    let kdf = match string(kdf, "type")? {
+        "pbkdf2" => Kdf::Pbkdf2 {
+            hash: Hash::parse(string(kdf, "hash")?)?,
+            iterations: small(number(kdf, "iterations")?, "iterations")?.max(1),
+            salt: base64(kdf, "salt")?,
+        },
+        t @ ("argon2i" | "argon2id") => Kdf::Argon2 {
+            id: t == "argon2id",
+            time: small(number(kdf, "time")?, "time")?,
+            memory_kib: small(number(kdf, "memory")?, "memory")?,
+            lanes: small(number(kdf, "cpus")?, "cpus")?,
+            salt: base64(kdf, "salt")?,
+        },
+        _ => return Ok(None),
+    };
+    let size = check_key(spec, number(s, "key_size")? as usize)?;
+    let area_spec = Spec::parse(string(area, "encryption")?)?;
+    let slot = Slot {
+        id: id.parse().unwrap_or(u32::MAX),
+        priority,
+        kdf,
+        af_hash: Hash::parse(string(af, "hash")?)?,
+        stripes: check_stripes(number(af, "stripes")?)?,
+        area_offset: number(area, "offset")?,
+        area_key: check_key(&area_spec, number(area, "key_size")? as usize)?,
+        area_spec,
+        digest,
+    };
+    Ok(Some((slot, size)))
 }

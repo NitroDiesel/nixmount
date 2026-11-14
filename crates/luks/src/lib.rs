@@ -54,27 +54,36 @@ impl Header {
     /// Finds the keyslot `passphrase` opens and recovers the volume key from it. Each try
     /// costs what the keyslot's key derivation was tuned to cost, typically a second or two.
     pub fn unlock(&self, dev: &dyn BlockDev, passphrase: &[u8]) -> Result<Key> {
+        // A keyslot that can't be tried, say for want of memory, doesn't stop the others.
+        let mut untried = None;
         for slot in &self.slots {
-            let mut derived = Zeroizing::new(vec![0u8; slot.area_key]);
-            match &slot.kdf {
-                header::Kdf::Pbkdf2 { hash, iterations, salt } => hash.pbkdf2(passphrase, salt, *iterations, &mut derived),
-                header::Kdf::Argon2 { id, time, memory_kib, lanes, salt } => {
-                    crypto::argon2(*id, passphrase, salt, *time, *memory_kib, *lanes, &mut derived)?
-                }
-            }
-            let len = self.key_size * slot.stripes;
-            let mut material = Zeroizing::new(vec![0u8; len.div_ceil(512) * 512]);
-            dev.read_at(slot.area_offset, &mut material)?;
-            let cipher = slot.area_spec.cipher(&derived)?;
-            for (i, sector) in material.chunks_mut(512).enumerate() {
-                cipher.decrypt(i as u64, sector);
-            }
-            let key = crypto::af_merge(&material[..len], self.key_size, slot.af_hash);
-            if self.digests.get(slot.digest).is_some_and(|d| key_matches(d, &key)) {
-                return Ok(Key(key));
+            match self.try_slot(dev, slot, passphrase) {
+                Ok(Some(key)) => return Ok(key),
+                Ok(None) => {}
+                Err(e) => untried = untried.or(Some(e)),
             }
         }
-        Err(wrong_passphrase())
+        Err(untried.unwrap_or_else(wrong_passphrase))
+    }
+
+    /// The volume key, if `passphrase` opens `slot`.
+    fn try_slot(&self, dev: &dyn BlockDev, slot: &header::Slot, passphrase: &[u8]) -> Result<Option<Key>> {
+        let mut derived = Zeroizing::new(vec![0u8; slot.area_key]);
+        match &slot.kdf {
+            header::Kdf::Pbkdf2 { hash, iterations, salt } => hash.pbkdf2(passphrase, salt, *iterations, &mut derived),
+            header::Kdf::Argon2 { id, time, memory_kib, lanes, salt } => {
+                crypto::argon2(*id, passphrase, salt, *time, *memory_kib, *lanes, &mut derived)?
+            }
+        }
+        let len = self.key_size * slot.stripes;
+        let mut material = Zeroizing::new(vec![0u8; len.div_ceil(512) * 512]);
+        dev.read_at(slot.area_offset, &mut material)?;
+        let cipher = slot.area_spec.cipher(&derived)?;
+        for (i, sector) in material.chunks_mut(512).enumerate() {
+            cipher.decrypt(i as u64, sector);
+        }
+        let key = crypto::af_merge(&material[..len], self.key_size, slot.af_hash);
+        Ok(self.digests.get(slot.digest).is_some_and(|d| key_matches(d, &key)).then_some(Key(key)))
     }
 
     /// Presents the decrypted volume. The key is checked first: a wrong one would turn
@@ -118,7 +127,8 @@ impl CryptDev {
     /// dm-crypt numbers sectors in 512-byte units whatever the encryption sector size.
     fn crypt(&self, at: u64, buf: &mut [u8], encrypt: bool) {
         for (i, s) in buf.chunks_mut(self.sector as usize).enumerate() {
-            let n = (at + i as u64 * self.sector) / 512 + self.iv_tweak;
+            // Wrapping, as dm-crypt does: the tweak comes from the header and can be anything.
+            let n = ((at + i as u64 * self.sector) / 512).wrapping_add(self.iv_tweak);
             if encrypt {
                 self.cipher.encrypt(n, s);
             } else {

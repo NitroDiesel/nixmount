@@ -331,7 +331,10 @@ impl App {
             let mut buf = Zeroizing::new(vec![0u16; n + 1]);
             let got = GetWindowTextW(self.pass, buf.as_mut_ptr(), buf.len() as i32).max(0) as usize;
             SetWindowTextW(self.pass, [0u16].as_ptr());
-            Zeroizing::new(String::from_utf16_lossy(&buf[..got.min(n)]))
+            // Sized once: a string that grows leaves its earlier, unwiped copies behind.
+            let mut pass = Zeroizing::new(String::with_capacity(n * 3));
+            pass.extend(char::decode_utf16(buf[..got.min(n)].iter().copied()).map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER)));
+            pass
         }
     }
 

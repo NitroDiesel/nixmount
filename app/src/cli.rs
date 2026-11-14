@@ -7,6 +7,7 @@ use crate::winfsp::Mount;
 use fscore::{resolve, FileKind, Filesystem, MountOpts};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::ptr::{null, null_mut};
 use std::sync::Arc;
 use zeroize::Zeroizing;
 
@@ -36,7 +37,7 @@ Usage:
   nixmount service run|debug      Run the service (debug: in this console)
 
 A target is an image file (optionally file#partition) or disk:partition, e.g. 1:3.
-Encrypted (LUKS) volumes ask for their passphrase, or take the first line of piped input.
+Encrypted (LUKS) volumes ask for their passphrase in a window, or take the first line of piped input.
 
 WinFsp - Windows File System Proxy, Copyright (C) Bill Zissimopoulos
 https://github.com/winfsp/winfsp";
@@ -93,26 +94,81 @@ fn take_value(args: &mut Vec<String>, flag: &str) -> Option<String> {
     v
 }
 
-/// Reads a passphrase: typed without echo at a console, or the first line of piped input,
-/// as cryptsetup does.
+/// The longest passphrase taken, in bytes. cryptsetup's own limit is 512 characters.
+const MAX_PASSPHRASE: usize = 4096;
+
+/// Asks for a passphrase in a console window of this program's own, without echo.
+///
+/// The console it was started from won't do. This is a windowed program, so the shell there
+/// hasn't waited for it and is reading the same keyboard: what is typed reaches the shell,
+/// which shows it and tries to run it.
+fn ask_in_own_window(prompt: &str, line: &mut String) -> Result<(), String> {
+    use windows_sys::Win32::Foundation::{CloseHandle, GENERIC_READ, GENERIC_WRITE};
+    use windows_sys::Win32::Storage::FileSystem::{CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING};
+    use windows_sys::Win32::System::Console::*;
+    let open = |name: &str| {
+        let name = crate::wide(name);
+        // SAFETY: `name` is NUL-terminated.
+        unsafe { CreateFileW(name.as_ptr(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, null(), OPEN_EXISTING, 0, null_mut()) }
+    };
+    let (title, text) = (crate::wide("NixMount"), prompt.encode_utf16().collect::<Vec<u16>>());
+    let mut typed = Zeroizing::new([0u16; 1024]);
+    let (mut n, mut got) = (0, 0);
+    // SAFETY: buffers are sized by the lengths passed, and the handles are closed once. The
+    // console from before comes back whether or not one of our own could be had.
+    let ok = unsafe {
+        FreeConsole();
+        let ours = AllocConsole() != 0;
+        if ours {
+            let (input, output) = (open("CONIN$"), open("CONOUT$"));
+            SetConsoleTitleW(title.as_ptr());
+            WriteConsoleW(output, text.as_ptr().cast(), text.len() as u32, &mut n, null());
+            SetConsoleMode(input, ENABLE_LINE_INPUT | ENABLE_PROCESSED_INPUT);
+            ReadConsoleW(input, typed.as_mut_ptr().cast(), typed.len() as u32, &mut got, null());
+            CloseHandle(input);
+            CloseHandle(output);
+            FreeConsole();
+        }
+        AttachConsole(ATTACH_PARENT_PROCESS);
+        ours
+    };
+    if !ok {
+        return Err("could not open a window to ask for the passphrase: pipe it to this command instead".into());
+    }
+    line.extend(char::decode_utf16(typed[..got as usize].iter().copied()).map(|c| c.unwrap_or(char::REPLACEMENT_CHARACTER)));
+    Ok(())
+}
+
+/// Reads a passphrase: the first line of piped input, as cryptsetup takes one, or else typed
+/// into a window. Everything it passes through is wiped, which rules out the standard
+/// library's stdin: that keeps what it reads in a buffer for as long as the program runs.
 fn read_passphrase(prompt: &str) -> Result<Zeroizing<String>, String> {
-    use windows_sys::Win32::System::Console::{GetConsoleMode, GetStdHandle, SetConsoleMode, ENABLE_ECHO_INPUT, STD_INPUT_HANDLE};
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::Storage::FileSystem::ReadFile;
+    use windows_sys::Win32::System::Console::{GetConsoleMode, GetStdHandle, STD_INPUT_HANDLE};
     // SAFETY: the mode is an out-parameter valid for the call.
     let (h, mut mode) = (unsafe { GetStdHandle(STD_INPUT_HANDLE) }, 0);
-    let console = !h.is_null() && unsafe { GetConsoleMode(h, &mut mode) } != 0;
-    if console {
-        eprint!("{prompt}");
-        // SAFETY: `h` is this process's console input.
-        unsafe { SetConsoleMode(h, mode & !ENABLE_ECHO_INPUT) };
+    let piped = !h.is_null() && h != INVALID_HANDLE_VALUE && unsafe { GetConsoleMode(h, &mut mode) } == 0;
+    // Sized once: a string that grows leaves its earlier, unwiped copies behind.
+    let mut line = Zeroizing::new(String::with_capacity(MAX_PASSPHRASE));
+    if piped {
+        let mut bytes = Zeroizing::new(Vec::with_capacity(MAX_PASSPHRASE));
+        loop {
+            let (mut byte, mut n) = (0u8, 0);
+            // One byte at a time, so that nothing after the first line is taken.
+            // SAFETY: the buffer is the one byte passed.
+            if unsafe { ReadFile(h, &mut byte, 1, &mut n, null_mut()) } == 0 || n == 0 || byte == b'\n' {
+                break;
+            }
+            if bytes.len() == MAX_PASSPHRASE {
+                return Err("the passphrase is too long".into());
+            }
+            bytes.push(byte);
+        }
+        line.push_str(std::str::from_utf8(&bytes).map_err(|_| "the passphrase isn't valid text")?);
+    } else {
+        ask_in_own_window(prompt, &mut line)?;
     }
-    let mut line = Zeroizing::new(String::new());
-    let r = std::io::stdin().read_line(&mut line);
-    if console {
-        // SAFETY: as above, restoring what was there.
-        unsafe { SetConsoleMode(h, mode) };
-        eprintln!();
-    }
-    r.map_err(|e| e.to_string())?;
     while line.ends_with(['\r', '\n']) {
         line.pop();
     }

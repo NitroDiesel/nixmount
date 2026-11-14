@@ -62,3 +62,19 @@ fn a_damaged_keyslot_fails_cleanly() {
     let h = luks::read_header(damaged.as_ref()).unwrap();
     assert!(h.unlock(damaged.as_ref(), b"compatkey").is_err());
 }
+
+/// A header can ask for any amount of key-derivation work. One asking for far more than a
+/// real volume would is refused when it is read, before a passphrase is ever tried.
+#[test]
+fn a_header_asking_for_endless_work_is_refused() {
+    let dev = image("luks1-cbc-essiv");
+    let mut all = vec![0u8; dev.len() as usize];
+    dev.read_at(0, &mut all).unwrap();
+    // The iteration count of keyslot 0, and then of the key digest.
+    for at in [208 + 4, 164] {
+        let mut hostile = all.clone();
+        hostile[at..at + 4].copy_from_slice(&u32::MAX.to_be_bytes());
+        let e = luks::read_header(&MemDev::new(hostile)).unwrap_err();
+        assert!(e.to_string().contains("key-derivation work"), "{e}");
+    }
+}
