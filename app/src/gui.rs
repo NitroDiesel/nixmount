@@ -122,6 +122,7 @@ enum Act {
     Dismiss,
     FocusPass,
     Unlock,
+    CancelUnlock,
     Lock,
 }
 
@@ -162,7 +163,8 @@ enum Msg {
     Failed(String),
     Scrub(ScrubState),
     Browser(Box<Browser>),
-    Unlocked { key: luks::Key, volume: Box<Volume> },
+    /// The outcome of unlock attempt `job`.
+    Unlocked { job: u64, result: Result<(luks::Key, Box<Volume>), String> },
 }
 
 /// An encrypted volume unlocked in this window. The key goes when it is locked again or the
@@ -204,6 +206,10 @@ struct App {
     detail_scroll: i32,
     detail_max: i32,
     unlocked: Vec<Unlocked>,
+    /// The volume being unlocked, and which attempt is the current one. One given up on
+    /// finishes in the background, and its key is wiped unused.
+    unlocking: Option<Target>,
+    unlock_job: u64,
     /// The native passphrase field, where it should be this frame, and where it is.
     pass: HWND,
     pass_rect: Option<Rect>,
@@ -347,15 +353,30 @@ impl App {
             return;
         }
         self.set_busy("Unlocking… this takes a few seconds");
-        let w = self.wnd();
+        self.unlock_job += 1;
+        self.unlocking = Some(v.target.clone());
+        let (w, job) = (self.wnd(), self.unlock_job);
         std::thread::spawn(move || {
-            let r = volumes::unlock(&v.target, pass.as_bytes()).and_then(|key| Ok((volumes::describe_unlocked(&v, &key)?, key)));
-            match r {
-                Ok((open, key)) => w.post(Msg::Unlocked { key, volume: Box::new(open) }),
-                Err(fscore::FsError::Unsupported(s)) => w.post(Msg::Failed(sentence(&s))),
-                Err(e) => w.post(Msg::Failed(e.to_string())),
-            }
+            let r = volumes::unlock(&v.target, pass.as_bytes()).and_then(|key| {
+                let open = volumes::describe_unlocked(&v, &key)?;
+                Ok((key, Box::new(open)))
+            });
+            let result = r.map_err(|e| match e {
+                fscore::FsError::Unsupported(s) => sentence(&s),
+                e => e.to_string(),
+            });
+            w.post(Msg::Unlocked { job, result });
         });
+    }
+
+    /// Gives up waiting for an unlock. Working out the key can't be interrupted, but it is
+    /// bounded, so it finishes on its own and its result is ignored.
+    fn cancel_unlock(&mut self) {
+        if self.unlocking.take().is_some() {
+            self.unlock_job += 1;
+            self.busy = None;
+            self.focus_pass = true;
+        }
     }
 
     /// Forgets the key of the selected volume. A mount keeps its own until unmounted.
@@ -490,7 +511,7 @@ impl App {
 
     fn act(&mut self, a: Act) {
         // One action at a time, while still letting people look around.
-        if self.busy.is_some() && !matches!(a, Act::Select(_) | Act::Dismiss | Act::WinFspHome) {
+        if self.busy.is_some() && !matches!(a, Act::Select(_) | Act::Dismiss | Act::WinFspHome | Act::CancelUnlock) {
             return;
         }
         match a {
@@ -504,6 +525,7 @@ impl App {
             }
             Act::FocusPass => self.focus_pass = true,
             Act::Unlock => self.unlock(),
+            Act::CancelUnlock => self.cancel_unlock(),
             Act::Lock => self.lock(),
             Act::AddImage => self.add_image(),
             Act::Refresh => {
@@ -774,13 +796,25 @@ impl App {
                 }
                 self.selected = self.selected.min(self.volumes.len().saturating_sub(1));
             }
-            Msg::Unlocked { key, volume } => {
+            Msg::Unlocked { job, result } => {
+                if job != self.unlock_job {
+                    return;
+                }
+                self.unlocking = None;
                 self.busy = None;
-                if let Some(i) = self.volumes.iter().position(|x| x.target == volume.target) {
-                    let locked = std::mem::replace(&mut self.volumes[i], (*volume).clone());
-                    self.unlocked.retain(|u| u.open.target != volume.target);
-                    self.unlocked.push(Unlocked { key, locked, open: *volume });
-                    self.banner = Some((false, "Unlocked. Mount it, or browse its files".into()));
+                match result {
+                    Ok((key, volume)) => {
+                        if let Some(i) = self.volumes.iter().position(|x| x.target == volume.target) {
+                            let locked = std::mem::replace(&mut self.volumes[i], (*volume).clone());
+                            self.unlocked.retain(|u| u.open.target != volume.target);
+                            self.unlocked.push(Unlocked { key, locked, open: *volume });
+                            self.banner = Some((false, "Unlocked. Mount it, or browse its files".into()));
+                        }
+                    }
+                    Err(e) => {
+                        self.banner = Some((true, e));
+                        self.focus_pass = true;
+                    }
                 }
             }
             Msg::Added(v) => {
@@ -832,7 +866,7 @@ impl App {
         let hot = self.hover.as_ref() == Some(&act);
         let radius = self.canvas.px(6.0);
         // One action at a time: a double click can't start a second mount.
-        if self.busy.is_some() {
+        if self.busy.is_some() && act != Act::CancelUnlock {
             self.canvas.card(r, radius, t.card, t.line);
             self.canvas.text(r, label, Font::Body, t.muted, true);
             return;
@@ -1376,7 +1410,12 @@ impl App {
         }
         self.region(field, Act::FocusPass);
         self.pass_rect = Some(field);
-        self.button(Rect::new(field.right() + gap, fy, bw, field_h), "Unlock", Act::Unlock, true);
+        let b = Rect::new(field.right() + gap, fy, bw, field_h);
+        if self.unlocking.as_ref() == Some(&v.target) {
+            self.button(b, "Cancel", Act::CancelUnlock, false);
+        } else {
+            self.button(b, "Unlock", Act::Unlock, true);
+        }
 
         let features = v.features.join(", ");
         let label_w = px(self, 68.0);
@@ -1876,6 +1915,8 @@ pub fn run() {
             detail_scroll: 0,
             detail_max: 0,
             unlocked: vec![],
+            unlocking: None,
+            unlock_job: 0,
             pass,
             pass_rect: None,
             pass_at: None,
@@ -1928,7 +1969,7 @@ pub fn screenshot(path: &std::path::Path, dark: bool, scene: &str, width: i32, h
     if scene == "empty" {
         volumes.clear();
     }
-    if scene == "locked" {
+    if scene == "locked" || scene == "unlocking" {
         let mut v = sample("", "LUKS2", 464 * GB, 0, false, &["LUKS2", "aes-xts-plain64", "512-bit key", "Argon2id"]);
         v.title = "Disk 0 · Partition 2".into();
         v.location = "Samsung SSD 970 EVO Plus".into();
@@ -1978,6 +2019,7 @@ pub fn screenshot(path: &std::path::Path, dark: bool, scene: &str, width: i32, h
         }
     });
     let n = volumes.len();
+    let unlocking = (scene == "unlocking").then(|| volumes[0].target.clone());
     let mut a = App {
         hwnd,
         canvas: Canvas::new((width as f32 * scale) as i32, (height as f32 * scale) as i32, scale),
@@ -1996,7 +2038,11 @@ pub fn screenshot(path: &std::path::Path, dark: bool, scene: &str, width: i32, h
         regions: vec![],
         hover: None,
         focus: None,
-        busy: (scene == "busy").then(|| "Mounting…".to_string()),
+        busy: match scene {
+            "busy" => Some("Mounting…".to_string()),
+            "unlocking" => Some("Unlocking… this takes a few seconds".to_string()),
+            _ => None,
+        },
         banner: None,
         browser,
         scrub: None,
@@ -2006,6 +2052,8 @@ pub fn screenshot(path: &std::path::Path, dark: bool, scene: &str, width: i32, h
         detail_scroll: 0,
         detail_max: 0,
         unlocked: vec![],
+        unlocking,
+        unlock_job: 0,
         pass: null_mut(),
         pass_rect: None,
         pass_at: None,
