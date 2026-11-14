@@ -1,6 +1,6 @@
 //! The [`Filesystem`] implementation: each mutating call is one rollback-protected step
 //! of the running transaction.
-use crate::dir::{ftype, kind_of};
+use crate::dir::ftype;
 use crate::extent::init_root;
 use crate::inode::*;
 use crate::mount::Ext4;
@@ -442,7 +442,7 @@ impl Filesystem for Ext4 {
         }
         f.dir_list(d, &raw, start, &mut |next, e| {
             let kind = if f.g.filetype {
-                kind_of(e.ftype)
+                FileKind::from_dirent(e.ftype)
             } else {
                 f.inode(e.ino).map_or(FileKind::Unknown, |r| r.kind())
             };

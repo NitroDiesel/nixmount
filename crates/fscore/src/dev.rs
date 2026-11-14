@@ -27,8 +27,26 @@ pub struct FileDev {
 }
 
 impl FileDev {
+    /// Opening for writing shuts out every other writer, as locking a partition does: two
+    /// programs writing one image would destroy it. Readers are still let in.
     pub fn open(path: &Path, writable: bool) -> Result<Self> {
-        let file = OpenOptions::new().read(true).write(writable).open(path)?;
+        let mut options = OpenOptions::new();
+        options.read(true).write(writable);
+        #[cfg(windows)]
+        if writable {
+            use std::os::windows::fs::OpenOptionsExt;
+            const FILE_SHARE_READ: u32 = 1;
+            const ERROR_SHARING_VIOLATION: i32 = 32;
+            options.share_mode(FILE_SHARE_READ);
+            return match options.open(path) {
+                Ok(file) => Ok(FileDev { len: file.metadata()?.len(), file, writable }),
+                Err(e) if e.raw_os_error() == Some(ERROR_SHARING_VIOLATION) => {
+                    Err(FsError::Unsupported("the image is in use by another program, close it and try again".into()))
+                }
+                Err(e) => Err(e.into()),
+            };
+        }
+        let file = options.open(path)?;
         let len = file.metadata()?.len();
         Ok(FileDev { file, len, writable })
     }
@@ -164,5 +182,28 @@ impl BlockDev for SliceDev {
     }
     fn writable(&self) -> bool {
         self.inner.writable()
+    }
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_image_has_one_writer() {
+        let path = std::env::temp_dir().join(format!("nixmount-one-writer-{}.img", std::process::id()));
+        std::fs::write(&path, [0u8; 4096]).unwrap();
+        let writer = FileDev::open(&path, true).unwrap();
+        // Another spelling of the same file is still the same file.
+        let shouted = std::path::PathBuf::from(path.to_string_lossy().to_uppercase());
+        assert!(matches!(FileDev::open(&shouted, true), Err(FsError::Unsupported(_))));
+        let reader = FileDev::open(&path, false).unwrap();
+        writer.write_at(0, b"x").unwrap();
+        let mut b = [0u8; 1];
+        reader.read_at(0, &mut b).unwrap();
+        assert_eq!(&b, b"x");
+        drop((writer, reader));
+        FileDev::open(&path, true).unwrap();
+        std::fs::remove_file(&path).unwrap();
     }
 }

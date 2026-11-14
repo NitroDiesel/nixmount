@@ -122,6 +122,22 @@ Check 'read-only mount refuses writes' $blocked
 NixMount unmount 'M:'
 Check 'read-only mount left the image untouched' ($before -eq (Get-FileHash $img).Hash)
 
+# A relative path means the caller's folder, not the service's, and an image has one writer
+# however its path is spelled.
+$img = Expand-Fixture 'ext4-1k-nocsum'
+Push-Location $Out
+try {
+    NixMount mount 'ext4-1k-nocsum.img' 'M:' --rw
+    Check 'a relative image path is found from where the command ran' ((Get-Content 'M:\hello.txt') -eq 'hello from linux')
+    $ErrorActionPreference = 'Continue'
+    $said = & $Exe mount $img.ToUpper() 'N:' --rw 2>&1 | Out-String
+    $ErrorActionPreference = 'Stop'
+    Check 'a second writer of one image is refused' ($LASTEXITCODE -ne 0 -and $said -match 'in use' -and -not (Test-Path 'N:\'))
+    NixMount unmount 'M:'
+} finally {
+    Pop-Location
+}
+
 # An encrypted volume made by cryptsetup, unlocked with a passphrase piped in as a script would.
 if (Test-Path 'tests/fixtures/luks2-btrfs.img.gz') {
     $img = Expand-Fixture 'luks2-btrfs'

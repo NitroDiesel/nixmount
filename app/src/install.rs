@@ -1,6 +1,6 @@
 //! One-step setup. Everything needed ships inside this executable, including the signed
 //! WinFsp installer, so a user runs one file and approves one elevation prompt.
-use crate::{config, service, winfsp};
+use crate::{config, service, wide, winfsp};
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -17,10 +17,6 @@ use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 /// executable's image and is only paged in during setup, so it costs no memory at run time.
 const WINFSP_MSI: &[u8] = include_bytes!("../res/winfsp-2.1.25156.msi");
 const UNINSTALL_KEY: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\NixMount";
-
-fn wide(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain([0]).collect()
-}
 
 /// True when this process holds a full administrator token.
 pub fn elevated() -> bool {

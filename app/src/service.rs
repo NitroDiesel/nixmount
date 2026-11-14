@@ -4,6 +4,7 @@ use crate::config::{Automount, Config};
 use crate::ipc::{self, Request, Response, ScrubState, Secret};
 use crate::mounts::Mounts;
 use crate::volumes;
+use crate::wide;
 use std::collections::BTreeSet;
 use std::ptr::{null, null_mut};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -29,10 +30,6 @@ struct State {
 
 static STATE: OnceLock<State> = OnceLock::new();
 static STATUS_HANDLE: Mutex<usize> = Mutex::new(0);
-
-fn wide(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain([0]).collect()
-}
 
 fn set_state(state: u32, accept: u32) {
     let h = *STATUS_HANDLE.lock().unwrap_or_else(|e| e.into_inner());

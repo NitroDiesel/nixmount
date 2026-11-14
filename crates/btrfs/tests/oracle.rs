@@ -110,25 +110,6 @@ fn open(imgs: &[PathBuf], opts: MountOpts) -> Btrfs {
     Btrfs::open(devs, opts).unwrap()
 }
 
-fn dump(tree: &Tree, dir: &Path) {
-    let _ = std::fs::remove_dir_all(dir);
-    std::fs::create_dir_all(dir).unwrap();
-    for (p, c) in tree {
-        let host = dir.join(p.trim_start_matches('/'));
-        match c {
-            Content::Dir => std::fs::create_dir_all(&host).unwrap(),
-            Content::File(d) => {
-                std::fs::create_dir_all(host.parent().unwrap()).unwrap();
-                std::fs::write(&host, d).unwrap();
-            }
-            Content::Link(t) => {
-                std::fs::create_dir_all(host.parent().unwrap()).unwrap();
-                std::os::unix::fs::symlink(String::from_utf8_lossy(t).as_ref(), &host).unwrap();
-            }
-        }
-    }
-}
-
 
 /// `mkfs --rootdir` is single-device only, so multi-device tests load content themselves.
 fn populate(fs: &dyn Filesystem, tree: &Tree) {

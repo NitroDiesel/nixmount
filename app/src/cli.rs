@@ -2,7 +2,8 @@
 use crate::ipc::{self, Request, Response, Secret};
 use crate::mounts::MountRequest;
 use crate::volumes::{self, Target, Volume};
-use crate::winfsp::{HostOptions, Mount};
+use crate::human;
+use crate::winfsp::Mount;
 use fscore::{resolve, FileKind, Filesystem, MountOpts};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -48,12 +49,18 @@ fn parse_target(s: &str) -> Target {
             return Target::Partition { disk, part };
         }
     }
+    // The service opens the image, and it runs somewhere else: a relative path would mean
+    // a different file there, or none.
+    let image = |path: &str, partition| Target::Image {
+        path: std::path::absolute(path).unwrap_or_else(|_| path.into()),
+        partition,
+    };
     if let Some((path, part)) = s.rsplit_once('#') {
         if let Ok(n) = part.parse() {
-            return Target::Image { path: path.into(), partition: Some(n) };
+            return image(path, Some(n));
         }
     }
-    Target::Image { path: s.into(), partition: None }
+    image(s, None)
 }
 
 fn call(r: &Request) -> Result<Response, String> {
@@ -64,25 +71,13 @@ fn call(r: &Request) -> Result<Response, String> {
     }
 }
 
-fn human(n: u64) -> String {
-    let units = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
-    let mut v = n as f64;
-    let mut u = 0;
-    while v >= 1024.0 && u + 1 < units.len() {
-        v /= 1024.0;
-        u += 1;
-    }
-    format!("{v:.1} {}", units[u])
-}
-
 fn print_volume(v: &Volume) {
     let t = match &v.target {
         Target::Partition { disk, part } => format!("{disk}:{part}"),
         Target::Image { path, .. } => path.display().to_string(),
         Target::Group { members } => members.iter().map(|m| format!("{}:{}", m.0, m.1)).collect::<Vec<_>>().join("+"),
     };
-    let name = if v.label.is_empty() { &v.title } else { &v.label };
-    println!("{t:<16} {:<8} {:>10}  {name}  ({})", v.kind, human(v.size), v.location);
+    println!("{t:<16} {:<8} {:>10}  {}  ({})", v.kind, human(v.size), v.name(), v.location);
 }
 
 fn take_flag(args: &mut Vec<String>, flag: &str) -> bool {
@@ -148,7 +143,7 @@ fn key_for(target: &Target, name: &str) -> Result<Option<luks::Key>, String> {
 fn open_for_reading(t: &str) -> Result<Arc<dyn Filesystem>, String> {
     let target = parse_target(t);
     let key = key_for(&target, t)?;
-    volumes::open_unlocked(&target, MountOpts::default(), key.as_ref()).map_err(|e| e.to_string())
+    volumes::open(&target, MountOpts::default(), key.as_ref()).map_err(|e| e.to_string())
 }
 
 fn cmd_info(target: &str) -> Result<(), String> {
@@ -250,18 +245,10 @@ pub fn export_path(fs: &dyn Filesystem, path: &str, dest: &Path) -> Result<u64, 
 
 fn foreground(req: MountRequest, key: Option<luks::Key>) -> Result<(), String> {
     let opts = MountOpts { write: req.write, cache_bytes: 0 };
-    let fs = volumes::open_unlocked(&req.target, opts, key.as_ref()).map_err(|e| e.to_string())?;
+    let fs = volumes::open(&req.target, opts, key.as_ref()).map_err(|e| e.to_string())?;
     let info = fs.info();
-    let host = HostOptions {
-        read_only: !req.write,
-        hide_dotfiles: req.hide_dotfiles,
-        codepage: req.codepage,
-        uid: req.uid,
-        gid: req.gid,
-        ..HostOptions::default()
-    };
     let point = if req.mount_point.is_empty() { "X:" } else { &req.mount_point };
-    let mount = Mount::start(fs.clone(), point, host)?;
+    let mount = Mount::start(fs.clone(), point, req.host_options())?;
     println!("Mounted {} at {} ({})", info.fs_type, point, if info.read_only { "read-only" } else { "read-write" });
     for r in info.ro_reasons.iter().chain(&info.notes) {
         println!("  {r}");
@@ -413,4 +400,18 @@ pub fn run(mut args: Vec<String>) -> Result<(), String> {
         _ => return Err(format!("unknown command `{cmd}`\n\n{USAGE}")),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn targets() {
+        assert_eq!(parse_target("1:3"), Target::Partition { disk: 1, part: 3 });
+        let here = std::env::current_dir().unwrap();
+        assert_eq!(parse_target("disk.img"), Target::Image { path: here.join("disk.img"), partition: None });
+        assert_eq!(parse_target("disk.img#2"), Target::Image { path: here.join("disk.img"), partition: Some(2) });
+        assert_eq!(parse_target(r"C:\images\a.img"), Target::Image { path: r"C:\images\a.img".into(), partition: None });
+    }
 }

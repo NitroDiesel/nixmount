@@ -66,25 +66,6 @@ fn fsck(img: &Path, ctx: &str) {
     );
 }
 
-fn dump(tree: &Tree, dir: &Path) {
-    let _ = std::fs::remove_dir_all(dir);
-    std::fs::create_dir_all(dir).unwrap();
-    for (p, c) in tree {
-        let host = dir.join(p.trim_start_matches('/'));
-        match c {
-            Content::Dir => std::fs::create_dir_all(&host).unwrap(),
-            Content::File(d) => {
-                std::fs::create_dir_all(host.parent().unwrap()).unwrap();
-                std::fs::write(&host, d).unwrap();
-            }
-            Content::Link(t) => {
-                std::fs::create_dir_all(host.parent().unwrap()).unwrap();
-                std::os::unix::fs::symlink(String::from_utf8_lossy(t).as_ref(), &host).unwrap();
-            }
-        }
-    }
-}
-
 fn open(img: &Path, opts: MountOpts) -> Ext4 {
     Ext4::open(Arc::new(FileDev::open(img, opts.write).unwrap()), opts).unwrap()
 }

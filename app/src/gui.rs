@@ -5,6 +5,7 @@ use crate::cli;
 use crate::ipc::{self, Request, Response, ScrubState, Secret};
 use crate::mounts::{MountRequest, MountStatus};
 use crate::volumes::{self, Target, Volume};
+use crate::{human, wide};
 use fscore::{resolve, DirEntry, FileKind, Filesystem, MountOpts};
 use std::path::PathBuf;
 use std::ptr::{null, null_mut};
@@ -241,26 +242,6 @@ fn sentence(s: &str) -> String {
     c.next().map_or_else(String::new, |f| f.to_uppercase().chain(c).collect())
 }
 
-fn wide(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain([0]).collect()
-}
-
-fn human(n: u64) -> String {
-    let units = ["B", "KB", "MB", "GB", "TB", "PB"];
-    let mut v = n as f64;
-    let mut u = 0;
-    // 1024-based with these labels, to match what Explorer shows for the same volume.
-    while v >= 1024.0 && u + 1 < units.len() {
-        v /= 1024.0;
-        u += 1;
-    }
-    if u == 0 {
-        format!("{n} B")
-    } else {
-        format!("{v:.1} {}", units[u])
-    }
-}
-
 fn system_dark() -> bool {
     let (key, val) = (wide(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"), wide("AppsUseLightTheme"));
     let (mut v, mut n) = (1u32, 4u32);
@@ -293,7 +274,7 @@ impl App {
     /// names, only ordinals, but they are what Windows' own dark apps use; on a system without
     /// them the menu simply stays light.
     fn theme_menus(&self) {
-        let name: Vec<u16> = "uxtheme.dll\0".encode_utf16().collect();
+        let name = wide("uxtheme.dll");
         // SAFETY: the module comes from System32, and these ordinals take the arguments below.
         unsafe {
             let m = LoadLibraryExW(name.as_ptr(), null_mut(), LOAD_LIBRARY_SEARCH_SYSTEM32);
@@ -314,8 +295,7 @@ impl App {
     fn apply_title_bar(&self) {
         self.theme_menus();
         let dark = self.dark as i32;
-        let caption = self.theme().side;
-        let bgr = ((caption & 0xFF) << 16) | (caption & 0xFF00) | ((caption >> 16) & 0xFF);
+        let bgr = colorref(self.theme().side);
         // SAFETY: attribute sizes match the values passed; failure leaves the default frame.
         unsafe {
             DwmSetWindowAttribute(self.hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE as u32, (&raw const dark).cast(), 4);
@@ -329,6 +309,11 @@ impl App {
 
     fn mount_of(&self, v: &Volume) -> Option<&MountStatus> {
         self.mounts.iter().find(|m| m.target == v.target)
+    }
+
+    /// Where the selected volume is mounted, if it is.
+    fn mount_point(&self) -> Option<String> {
+        self.current().and_then(|v| self.mount_of(v)).map(|m| m.mount_point.clone())
     }
 
     fn key_of(&self, t: &Target) -> Option<luks::Key> {
@@ -524,13 +509,13 @@ impl App {
             }
             Act::Mount => self.do_mount(),
             Act::Unmount => {
-                let Some(m) = self.current().and_then(|v| self.mount_of(v)) else { return };
-                let req = Request::Unmount { point: m.mount_point.clone() };
+                let Some(point) = self.mount_point() else { return };
+                let req = Request::Unmount { point };
                 self.request("Committing and detaching…", req, Some("Safe to disconnect".into()));
             }
             Act::OpenFolder => {
-                if let Some(m) = self.current().and_then(|v| self.mount_of(v)) {
-                    let p = wide(&format!("{}\\", m.mount_point));
+                if let Some(point) = self.mount_point() {
+                    let p = wide(&format!("{point}\\"));
                     let verb = wide("open");
                     // SAFETY: strings are NUL-terminated.
                     unsafe { ShellExecuteW(self.hwnd, verb.as_ptr(), p.as_ptr(), null(), null(), SW_SHOW) };
@@ -544,24 +529,23 @@ impl App {
             }
             Act::ToggleAuto => self.toggle_auto(),
             Act::Scrub => {
-                let Some(m) = self.current().and_then(|v| self.mount_of(v)) else { return };
-                let req = Request::Scrub { point: m.mount_point.clone() };
+                let Some(point) = self.mount_point() else { return };
+                let req = Request::Scrub { point };
                 self.request("Starting verification…", req, None);
                 self.scrub = Some(ScrubState { running: true, ..ScrubState::default() });
                 // SAFETY: the window is alive.
                 unsafe { SetTimer(self.hwnd, TIMER_STATUS, 500, None) };
             }
             Act::Snapshot => {
-                let Some(m) = self.current().and_then(|v| self.mount_of(v)) else { return };
+                let Some(point) = self.mount_point() else { return };
                 let t = fscore::Time::now().sec;
                 let name = format!("snapshot-{t}");
                 let note = format!("Created read-only snapshot {name}");
-                let req = Request::Snapshot { point: m.mount_point.clone(), name, read_only: true };
+                let req = Request::Snapshot { point, name, read_only: true };
                 self.request("Creating snapshot…", req, Some(note));
             }
             Act::DeleteSubvolume(name) => {
-                let Some(m) = self.current().and_then(|v| self.mount_of(v)) else { return };
-                let point = m.mount_point.clone();
+                let Some(point) = self.mount_point() else { return };
                 let text = format!("Delete {name} and everything in it? This can't be undone.");
                 if self.confirm("Delete this subvolume?", &text) {
                     let req = Request::DeleteSubvolume { point, name: name.clone() };
@@ -647,20 +631,15 @@ impl App {
     }
 
     fn pick_letter(&mut self) {
-        use windows_sys::Win32::Storage::FileSystem::GetLogicalDrives;
         // SAFETY: a fresh popup menu, destroyed below.
         let menu = unsafe { CreatePopupMenu() };
-        // SAFETY: no arguments.
-        let used = unsafe { GetLogicalDrives() };
         let auto = wide("Next free letter");
         // SAFETY: `menu` is live; strings are NUL-terminated.
         unsafe {
             AppendMenuW(menu, MF_STRING, 1, auto.as_ptr());
-            for i in (3..26u32).rev() {
-                if used & (1 << i) == 0 {
-                    let label = wide(&format!("{}:", (b'A' + i as u8) as char));
-                    AppendMenuW(menu, MF_STRING, 2 + i as usize, label.as_ptr());
-                }
+            for letter in crate::mounts::free_letters() {
+                let label = wide(&format!("{letter}:"));
+                AppendMenuW(menu, MF_STRING, 2 + (letter as u8 - b'A') as usize, label.as_ptr());
             }
             let mut p = POINT { x: 0, y: 0 };
             GetCursorPos(&mut p);
@@ -681,7 +660,7 @@ impl App {
         let key = self.key_of(&v.target);
         self.set_busy("Opening…");
         let w = self.wnd();
-        std::thread::spawn(move || match volumes::open_unlocked(&v.target, MountOpts::default(), key.as_ref()) {
+        std::thread::spawn(move || match volumes::open(&v.target, MountOpts::default(), key.as_ref()) {
             Ok(fs) => {
                 let mut b = Browser { fs: Some(fs), target: v.target, path: vec![], rows: vec![], scroll: 0, selected: None };
                 list_into(&mut b);
@@ -978,7 +957,7 @@ impl App {
             .volumes
             .iter()
             .map(|v| {
-                let name = if v.label.is_empty() { v.title.clone() } else { v.label.clone() };
+                let name = v.name().to_string();
                 let icon = if v.locked {
                     I_LOCK
                 } else if matches!(v.target, Target::Image { .. }) {
@@ -1075,13 +1054,8 @@ impl App {
         if self.service == Service::Unknown || (self.service == Service::Ready && self.winfsp) {
             return y;
         }
-        let (title, text, label, act) = (
-            "Install NixMount",
-            "One step sets up the driver and background service that give volumes a drive letter. Everything is \
-             included, with nothing else to download.",
-            "Install",
-            Act::Install,
-        );
+        let text = "One step sets up the driver and background service that give volumes a drive letter. Everything \
+                    is included, with nothing else to download.";
         let inner = r.w - self.canvas.px(32.0);
         let tw = inner - self.canvas.px(170.0);
         let h = self.canvas.px(88.0);
@@ -1089,13 +1063,13 @@ impl App {
         self.canvas.card(card, radius, t.card, t.line);
         let tx = r.x + self.canvas.px(16.0);
         let ty = y + self.canvas.px(12.0);
-        self.canvas.text(Rect::new(tx, ty, tw, self.canvas.px(20.0)), title, Font::Strong, t.text, false);
+        self.canvas.text(Rect::new(tx, ty, tw, self.canvas.px(20.0)), "Install NixMount", Font::Strong, t.text, false);
         let pr = Rect::new(tx, ty + self.canvas.px(22.0), tw, self.canvas.px(44.0));
         self.canvas.paragraph(pr, text, Font::Small, t.muted);
         let bw = self.canvas.px(136.0);
         let bh = self.canvas.px(34.0);
         let br = Rect::new(card.right() - bw - self.canvas.px(16.0), y + (h - bh) / 2, bw, bh);
-        self.button(br, label, act, true);
+        self.button(br, "Install", Act::Install, true);
         y + h + self.canvas.px(16.0)
     }
 
@@ -1173,7 +1147,7 @@ impl App {
         y = self.paint_setup(r, y);
         let Some(v) = self.current().cloned() else { return self.empty_state(r, y) };
         let mounted = self.mount_of(&v).cloned();
-        let name = if v.label.is_empty() { v.title.clone() } else { v.label.clone() };
+        let name = v.name().to_string();
 
         let (status, dot) = match &mounted {
             Some(m) if m.read_only => (format!("Read-only at {}", m.mount_point), t.warn),
@@ -1351,22 +1325,7 @@ impl App {
         } else {
             Rect::new(r.x + col + gap, y, col, h.max(about_h))
         };
-        self.canvas.card(about, radius, t.card, t.line);
-        let tr = Rect::new(about.x + pad, about.y + self.canvas.px(12.0), inner, self.canvas.px(22.0));
-        self.canvas.text(tr, "About this volume", Font::Strong, t.text, false);
-        let mut ay = about.y + head;
-        self.fact(about.x + pad, ay, inner, "Type", &v.kind);
-        ay += row;
-        let uuid = if v.uuid.is_empty() { "Unknown" } else { &v.uuid };
-        self.fact(about.x + pad, ay, inner, "UUID", uuid);
-        ay += row;
-        if !features.is_empty() {
-            let lw = self.canvas.px(68.0);
-            let lr = Rect::new(about.x + pad, ay, lw, self.canvas.px(22.0));
-            self.canvas.text(lr, "Features", Font::Small, t.muted, false);
-            let fr = Rect::new(about.x + pad + lw, ay + self.canvas.px(3.0), value_w, features_h);
-            self.canvas.paragraph(fr, &features, Font::Small, t.muted);
-        }
+        self.about_card(about, &v, "Features", &features, features_h);
         let mut end = about.bottom();
 
         // Snapshots get their own card: this is the way back out of creating them.
@@ -1420,20 +1379,30 @@ impl App {
         let label_w = px(self, 68.0);
         let features_h = self.canvas.wrapped_height(&features, Font::Small, inner - label_w);
         let about = Rect::new(r.x, card.bottom() + pad, r.w, head + row * 2 + features_h.max(row) + pad);
-        self.canvas.card(about, radius, t.card, t.line);
-        let tr = Rect::new(about.x + pad, about.y + px(self, 12.0), inner, px(self, 22.0));
+        self.about_card(about, v, "Encryption", &features, features_h);
+        about.bottom()
+    }
+
+    /// The card of facts about a volume. `features` goes under the name `label`.
+    fn about_card(&mut self, about: Rect, v: &Volume, label: &str, features: &str, features_h: i32) {
+        let t = self.theme();
+        let (pad, row, lw) = (self.canvas.px(16.0), self.canvas.px(26.0), self.canvas.px(68.0));
+        let inner = about.w - pad * 2;
+        self.canvas.card(about, self.canvas.px(8.0), t.card, t.line);
+        let tr = Rect::new(about.x + pad, about.y + self.canvas.px(12.0), inner, self.canvas.px(22.0));
         self.canvas.text(tr, "About this volume", Font::Strong, t.text, false);
-        let mut ay = about.y + head;
+        let mut ay = about.y + self.canvas.px(44.0);
         self.fact(about.x + pad, ay, inner, "Type", &v.kind);
         ay += row;
         let uuid = if v.uuid.is_empty() { "Unknown" } else { &v.uuid };
         self.fact(about.x + pad, ay, inner, "UUID", uuid);
         ay += row;
-        let lr = Rect::new(about.x + pad, ay, label_w, px(self, 22.0));
-        self.canvas.text(lr, "Encryption", Font::Small, t.muted, false);
-        let fr = Rect::new(about.x + pad + label_w, ay + px(self, 3.0), inner - label_w, features_h);
-        self.canvas.paragraph(fr, &features, Font::Small, t.muted);
-        about.bottom()
+        if !features.is_empty() {
+            let lr = Rect::new(about.x + pad, ay, lw, self.canvas.px(22.0));
+            self.canvas.text(lr, label, Font::Small, t.muted, false);
+            let fr = Rect::new(about.x + pad + lw, ay + self.canvas.px(3.0), inner - lw, features_h);
+            self.canvas.paragraph(fr, features, Font::Small, t.muted);
+        }
     }
 
     fn chip_width(&self, s: &str) -> i32 {
@@ -1926,23 +1895,15 @@ pub fn run() {
 
 /// Renders the interface with sample data to a BMP, to check the design headlessly.
 pub fn screenshot(path: &std::path::Path, dark: bool, scene: &str, width: i32, height: i32, scale: f32) {
-    let sample = |label: &str, kind: &str, size: u64, used: u64, removable: bool, feats: &[&str]| Volume {
-        target: Target::Partition { disk: 1, part: label.len() as u32 },
-        title: "Disk 1 · Partition 2".into(),
-        location: "SanDisk Extreme Pro".into(),
-        size,
-        kind: kind.into(),
-        mountable: true,
-        label: label.into(),
-        uuid: "6a823ff5-4a92-4fce-b538-02dc1d57d87b".into(),
-        removable,
-        used: Some(used),
-        features: feats.iter().map(|f| f.to_string()).collect(),
-        ro_reasons: vec![],
-        notes: vec![],
-        error: None,
-        encrypted: false,
-        locked: false,
+    let sample = |label: &str, kind: &str, size: u64, used: u64, removable: bool, feats: &[&str]| {
+        let target = Target::Partition { disk: 1, part: label.len() as u32 };
+        let mut v = Volume::new(target, "Disk 1 · Partition 2".into(), "SanDisk Extreme Pro".into(), size, kind.into());
+        v.label = label.into();
+        v.uuid = "6a823ff5-4a92-4fce-b538-02dc1d57d87b".into();
+        v.removable = removable;
+        v.used = Some(used);
+        v.features = feats.iter().map(|f| f.to_string()).collect();
+        v
     };
     const GB: u64 = 1 << 30;
     let ext4 = [

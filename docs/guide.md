@@ -136,7 +136,9 @@ that Windows sees the disk.
 formatting erases them.
 
 **"The partition is in use by another program."** Writing needs exclusive access. Close anything
-using the disk, such as a disk tool, a virtual machine or WSL.
+using the disk, such as a disk tool, a virtual machine or WSL. An image file gives the same
+message if something else has it open for writing, including NixMount itself under another
+drive letter.
 
 **A volume mounted read-only although I asked for writing.** It uses a feature that isn't
 writable, was not shut down cleanly in a way that can't be recovered here, or has recorded

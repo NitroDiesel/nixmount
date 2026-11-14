@@ -22,9 +22,7 @@ pub const IN_SKINNY: u64 = 1 << 8;
 pub const IN_NO_HOLES: u64 = 1 << 9;
 pub const IN_METADATA_UUID: u64 = 1 << 10;
 pub const IN_RAID1C34: u64 = 1 << 11;
-pub const IN_ZONED: u64 = 1 << 12;
-pub const IN_EXTENT_TREE_V2: u64 = 1 << 13;
-pub const IN_RAID_STRIPE_TREE: u64 = 1 << 14;
+// Bits 12 to 14 (zoned, extent tree v2, RAID stripe tree) are not supported, so not known.
 pub const IN_SIMPLE_QUOTA: u64 = 1 << 16;
 const IN_KNOWN: u64 = IN_MIXED_BACKREF
     | IN_DEFAULT_SUBVOL

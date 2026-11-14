@@ -37,32 +37,6 @@ pub const O_CTIME: usize = 124;
 pub const O_MTIME: usize = 136;
 pub const O_OTIME: usize = 148;
 
-pub fn kind_of_mode(mode: u32) -> FileKind {
-    match mode & S_IFMT {
-        S_IFREG => FileKind::File,
-        S_IFDIR => FileKind::Dir,
-        S_IFLNK => FileKind::Symlink,
-        0x2000 => FileKind::CharDev,
-        0x6000 => FileKind::BlockDev,
-        0x1000 => FileKind::Fifo,
-        0xC000 => FileKind::Socket,
-        _ => FileKind::Unknown,
-    }
-}
-
-pub fn kind_of_ft(t: u8) -> FileKind {
-    match t {
-        1 => FileKind::File,
-        2 => FileKind::Dir,
-        3 => FileKind::CharDev,
-        4 => FileKind::BlockDev,
-        5 => FileKind::Fifo,
-        6 => FileKind::Socket,
-        7 => FileKind::Symlink,
-        _ => FileKind::Unknown,
-    }
-}
-
 /// One decoded name inside a DIR_ITEM, DIR_INDEX or XATTR_ITEM.
 #[derive(Clone, Debug)]
 pub struct DirItem {
@@ -110,7 +84,7 @@ impl Fs {
         let mode = b.u32_at(O_MODE);
         Stat {
             ino,
-            kind: kind_of_mode(mode),
+            kind: FileKind::from_mode(mode),
             mode: mode & 0o7777,
             uid: b.u32_at(44),
             gid: b.u32_at(48),
@@ -170,7 +144,7 @@ impl Fs {
                 }
                 // A subvolume whose root was deleted can leave a dangling entry behind.
                 let Ok(ino) = self.resolve_location(dir, &e) else { continue };
-                let de = DirEntry { kind: kind_of_ft(e.ftype), name: e.name, ino };
+                let de = DirEntry { kind: FileKind::from_dirent(e.ftype), name: e.name, ino };
                 if !out(k.off + 1, de) {
                     return Ok(false);
                 }

@@ -59,16 +59,7 @@ impl Inode for [u8] {
         }
     }
     fn kind(&self) -> FileKind {
-        match self.mode() & S_IFMT {
-            S_IFREG => FileKind::File,
-            S_IFDIR => FileKind::Dir,
-            S_IFLNK => FileKind::Symlink,
-            0x2000 => FileKind::CharDev,
-            0x6000 => FileKind::BlockDev,
-            0x1000 => FileKind::Fifo,
-            0xC000 => FileKind::Socket,
-            _ => FileKind::Unknown,
-        }
+        FileKind::from_mode(self.mode() as u32)
     }
 }
 

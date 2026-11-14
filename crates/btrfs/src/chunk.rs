@@ -19,7 +19,6 @@ pub const PROFILE_MASK: u64 = RAID0 | RAID1 | DUP | RAID10 | RAID5 | RAID6 | RAI
 pub struct Stripe {
     pub devid: u64,
     pub offset: u64,
-    pub uuid: [u8; 16],
 }
 
 #[derive(Clone, Debug)]
@@ -49,9 +48,7 @@ pub fn parse_chunk(start: u64, b: &[u8]) -> Result<Chunk> {
     let stripes = (0..n)
         .map(|i| {
             let o = 48 + i * 32;
-            let mut uuid = [0; 16];
-            uuid.copy_from_slice(&b[o + 16..o + 32]);
-            Stripe { devid: b.u64_at(o), offset: b.u64_at(o + 8), uuid }
+            Stripe { devid: b.u64_at(o), offset: b.u64_at(o + 8) }
         })
         .collect();
     Ok(Chunk { start, len, ty, stripe_len, sub_stripes: sub.max(1), stripes })
@@ -294,7 +291,7 @@ mod tests {
 
     fn chunk(ty: u64, n: usize, sub: u64) -> Chunk {
         let stripes =
-            (0..n).map(|i| Stripe { devid: i as u64 + 1, offset: 1 << 20, uuid: [0; 16] }).collect();
+            (0..n).map(|i| Stripe { devid: i as u64 + 1, offset: 1 << 20}).collect();
         Chunk { start: 0, len: 1 << 30, ty, stripe_len: 65536, sub_stripes: sub, stripes }
     }
 

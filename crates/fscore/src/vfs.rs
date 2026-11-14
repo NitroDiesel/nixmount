@@ -71,6 +71,36 @@ pub enum FileKind {
     Unknown,
 }
 
+impl FileKind {
+    /// From the type bits of a Linux `st_mode`.
+    pub fn from_mode(mode: u32) -> FileKind {
+        match mode & 0xF000 {
+            0x8000 => FileKind::File,
+            0x4000 => FileKind::Dir,
+            0xA000 => FileKind::Symlink,
+            0x2000 => FileKind::CharDev,
+            0x6000 => FileKind::BlockDev,
+            0x1000 => FileKind::Fifo,
+            0xC000 => FileKind::Socket,
+            _ => FileKind::Unknown,
+        }
+    }
+
+    /// From the file type stored in a directory entry, which ext and Btrfs number alike.
+    pub fn from_dirent(t: u8) -> FileKind {
+        match t {
+            1 => FileKind::File,
+            2 => FileKind::Dir,
+            3 => FileKind::CharDev,
+            4 => FileKind::BlockDev,
+            5 => FileKind::Fifo,
+            6 => FileKind::Socket,
+            7 => FileKind::Symlink,
+            _ => FileKind::Unknown,
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct Time {
     pub sec: i64,

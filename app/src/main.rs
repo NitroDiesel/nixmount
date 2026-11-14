@@ -25,6 +25,30 @@ mod volumes;
 #[cfg(windows)]
 mod winfsp;
 
+/// A string as NUL-terminated UTF-16, the form Windows takes.
+#[cfg(windows)]
+fn wide(s: &str) -> Vec<u16> {
+    s.encode_utf16().chain([0]).collect()
+}
+
+/// A size for people. 1024-based with these labels, to match what Explorer shows for the
+/// same volume.
+#[cfg(windows)]
+fn human(n: u64) -> String {
+    let units = ["B", "KB", "MB", "GB", "TB", "PB"];
+    let mut v = n as f64;
+    let mut u = 0;
+    while v >= 1024.0 && u + 1 < units.len() {
+        v /= 1024.0;
+        u += 1;
+    }
+    if u == 0 {
+        format!("{n} B")
+    } else {
+        format!("{v:.1} {}", units[u])
+    }
+}
+
 #[cfg(windows)]
 fn main() {
     use windows_sys::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};

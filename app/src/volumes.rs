@@ -47,6 +47,42 @@ pub struct Volume {
 
 pub const LOCKED: &str = "this volume is encrypted, so it needs its passphrase";
 
+/// How a volume is opened just to describe it.
+const PEEK: MountOpts = MountOpts { write: false, cache_bytes: 1 << 20 };
+
+impl Volume {
+    /// A list entry with nothing read from the volume yet.
+    pub fn new(target: Target, title: String, location: String, size: u64, kind: String) -> Volume {
+        Volume {
+            target,
+            title,
+            location,
+            size,
+            kind,
+            mountable: true,
+            label: String::new(),
+            uuid: String::new(),
+            removable: false,
+            used: None,
+            features: vec![],
+            ro_reasons: vec![],
+            notes: vec![],
+            error: None,
+            encrypted: false,
+            locked: false,
+        }
+    }
+
+    /// What to call it: its label, or failing that where it is.
+    pub fn name(&self) -> &str {
+        if self.label.is_empty() {
+            &self.title
+        } else {
+            &self.label
+        }
+    }
+}
+
 /// Opens every device of `target`.
 fn devices(target: &Target, write: bool) -> Result<Vec<Arc<dyn BlockDev>>> {
     match target {
@@ -98,11 +134,7 @@ pub fn unlock(target: &Target, passphrase: &[u8]) -> Result<luks::Key> {
 
 /// Opens a volume with the engine its signature calls for. Devices are opened read-only
 /// unless writing was requested, so a read-only mount cannot write even by accident.
-pub fn open(target: &Target, opts: MountOpts) -> Result<Arc<dyn Filesystem>> {
-    open_with_devices(target, opts, None).map(|(fs, _)| fs)
-}
-
-pub fn open_unlocked(target: &Target, opts: MountOpts, key: Option<&luks::Key>) -> Result<Arc<dyn Filesystem>> {
+pub fn open(target: &Target, opts: MountOpts, key: Option<&luks::Key>) -> Result<Arc<dyn Filesystem>> {
     open_with_devices(target, opts, key).map(|(fs, _)| fs)
 }
 
@@ -140,7 +172,7 @@ fn enrich(v: &mut Volume) {
         v.features = h.summary();
         return;
     }
-    match open(&v.target, MountOpts { write: false, cache_bytes: 1 << 20 }) {
+    match open(&v.target, PEEK, None) {
         Ok(fs) => fill_from(v, &fs.info()),
         Err(e) => v.error = Some(e.to_string()),
     }
@@ -148,7 +180,7 @@ fn enrich(v: &mut Volume) {
 
 /// What an unlocked volume holds, for the list.
 pub fn describe_unlocked(v: &Volume, key: &luks::Key) -> Result<Volume> {
-    let fs = open_unlocked(&v.target, MountOpts { write: false, cache_bytes: 1 << 20 }, Some(key))?;
+    let fs = open(&v.target, PEEK, Some(key))?;
     let mut out = v.clone();
     fill_from(&mut out, &fs.info());
     out.error = None;
@@ -196,24 +228,10 @@ pub fn scan_disks() -> Vec<Volume> {
                 target = Target::Group { members: vec![(p.disk, p.part)] };
             }
         }
-        let mut v = Volume {
-            target,
-            title: format!("Disk {} · Partition {}", p.disk, p.part),
-            location: p.disk_name.clone(),
-            size: p.size,
-            kind: p.kind.name(),
-            mountable: p.kind.mountable() || p.kind == FsKind::Luks,
-            label: String::new(),
-            uuid: String::new(),
-            removable: p.removable,
-            used: None,
-            features: vec![],
-            ro_reasons: vec![],
-            notes: vec![],
-            error: None,
-            encrypted: false,
-        locked: false,
-        };
+        let title = format!("Disk {} · Partition {}", p.disk, p.part);
+        let mut v = Volume::new(target, title, p.disk_name.clone(), p.size, p.kind.name());
+        v.mountable = p.kind.mountable() || p.kind == FsKind::Luks;
+        v.removable = p.removable;
         if !v.mountable {
             v.error = Some(format!("{} volumes aren't supported", v.kind));
         }
@@ -235,24 +253,10 @@ pub fn scan_disks() -> Vec<Volume> {
 /// Describes an image file for the volume list.
 pub fn describe_image(path: &Path) -> Volume {
     let name = path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
-    let mut v = Volume {
-        target: Target::Image { path: path.to_path_buf(), partition: None },
-        title: name,
-        location: path.parent().map_or_else(String::new, |p| p.display().to_string()),
-        size: std::fs::metadata(path).map_or(0, |m| m.len()),
-        kind: "image".into(),
-        mountable: true,
-        label: String::new(),
-        uuid: String::new(),
-        removable: false,
-        used: None,
-        features: vec![],
-        ro_reasons: vec![],
-        notes: vec![],
-        error: None,
-        encrypted: false,
-        locked: false,
-    };
+    let target = Target::Image { path: path.to_path_buf(), partition: None };
+    let location = path.parent().map_or_else(String::new, |p| p.display().to_string());
+    let size = std::fs::metadata(path).map_or(0, |m| m.len());
+    let mut v = Volume::new(target, name, location, size, "image".into());
     enrich(&mut v);
     if v.error.is_some() {
         v.mountable = false;
@@ -270,24 +274,8 @@ pub fn describe_mounted(target: &Target, info: &VolumeInfo, encrypted: bool) -> 
             path.parent().map_or_else(String::new, |p| p.display().to_string()),
         ),
     };
-    let mut v = Volume {
-        target: target.clone(),
-        title,
-        location,
-        size: info.total_bytes,
-        kind: info.fs_type.clone(),
-        mountable: true,
-        label: String::new(),
-        uuid: String::new(),
-        removable: false,
-        used: None,
-        features: vec![],
-        ro_reasons: vec![],
-        notes: vec![],
-        error: None,
-        encrypted,
-        locked: false,
-    };
+    let mut v = Volume::new(target.clone(), title, location, info.total_bytes, info.fs_type.clone());
+    v.encrypted = encrypted;
     fill_from(&mut v, info);
     v
 }

@@ -27,7 +27,7 @@ impl Drop for Raw {
 }
 
 fn open_raw(path: &str, write: bool) -> Result<Raw> {
-    let wide: Vec<u16> = path.encode_utf16().chain([0]).collect();
+    let wide = crate::wide(path);
     let access = GENERIC_READ | if write { GENERIC_WRITE } else { 0 };
     // SAFETY: `wide` is NUL-terminated.
     let h = unsafe {
@@ -251,7 +251,7 @@ fn drive_letters() -> Vec<(u32, u32, char)> {
 }
 
 fn open_attrs(path: &str) -> Result<Raw> {
-    let wide: Vec<u16> = path.encode_utf16().chain([0]).collect();
+    let wide = crate::wide(path);
     // SAFETY: `wide` is NUL-terminated; zero access only queries the device.
     let h = unsafe { CreateFileW(wide.as_ptr(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE, null(), OPEN_EXISTING, 0, null_mut()) };
     if h == INVALID_HANDLE_VALUE {

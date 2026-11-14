@@ -22,6 +22,19 @@ pub struct MountRequest {
     pub gid: Option<u32>,
 }
 
+impl MountRequest {
+    pub fn host_options(&self) -> HostOptions {
+        HostOptions {
+            read_only: !self.write,
+            hide_dotfiles: self.hide_dotfiles,
+            codepage: self.codepage,
+            uid: self.uid,
+            gid: self.gid,
+            ..HostOptions::default()
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct MountStatus {
     pub target: Target,
@@ -51,13 +64,16 @@ struct Entry {
 #[derive(Default)]
 pub struct Mounts {
     list: Mutex<Vec<Entry>>,
+    /// Held while a volume is being mounted, so two requests can't both find it unmounted.
+    mounting: Mutex<()>,
 }
 
-fn free_letter() -> Option<String> {
+/// Drive letters nothing is using, from Z down to D.
+pub fn free_letters() -> impl Iterator<Item = char> {
     use windows_sys::Win32::Storage::FileSystem::GetLogicalDrives;
     // SAFETY: no arguments.
     let used = unsafe { GetLogicalDrives() };
-    (3..26).rev().find(|i| used & (1 << i) == 0).map(|i| format!("{}:", (b'A' + i as u8) as char))
+    (3..26u8).rev().filter(move |i| used & (1 << i) == 0).map(|i| (b'A' + i) as char)
 }
 
 impl Mounts {
@@ -67,25 +83,18 @@ impl Mounts {
 
     /// Mounts `r`. An encrypted volume needs `key`, which lives in the mount until unmount.
     pub fn mount(&self, r: MountRequest, key: Option<luks::Key>) -> Result<MountStatus, String> {
+        let _one = self.mounting.lock().unwrap_or_else(|e| e.into_inner());
         if self.lock().iter().any(|e| e.target == r.target) {
             return Err("this volume is already mounted".into());
         }
         let point = if r.mount_point.is_empty() {
-            free_letter().ok_or("no free drive letters")?
+            format!("{}:", free_letters().next().ok_or("no free drive letters")?)
         } else {
             r.mount_point.clone()
         };
         let opts = MountOpts { write: r.write, cache_bytes: 0 };
         let (fs, devs) = volumes::open_with_devices(&r.target, opts, key.as_ref()).map_err(|e| e.to_string())?;
-        let host = HostOptions {
-            read_only: !r.write,
-            hide_dotfiles: r.hide_dotfiles,
-            codepage: r.codepage,
-            uid: r.uid,
-            gid: r.gid,
-            ..HostOptions::default()
-        };
-        let mount = Mount::start(fs.clone(), &point, host)?;
+        let mount = Mount::start(fs.clone(), &point, r.host_options())?;
         let stats = mount.stats.clone();
         let e = Entry { target: r.target, fs, devs, mount, stats, encrypted: key.is_some() };
         let status = status_of(&e);

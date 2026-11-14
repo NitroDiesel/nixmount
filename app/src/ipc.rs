@@ -159,7 +159,7 @@ impl Pipe {
 pub fn call(req: &Request) -> std::io::Result<Response> {
     const ERROR_FILE_NOT_FOUND: i32 = 2;
     const ERROR_PIPE_BUSY: i32 = 231;
-    let wide: Vec<u16> = PIPE.encode_utf16().chain([0]).collect();
+    let wide = crate::wide(PIPE);
     for attempt in 0.. {
         // SAFETY: `wide` is NUL-terminated.
         let h = unsafe { CreateFileW(wide.as_ptr(), GENERIC_READ | GENERIC_WRITE, 0, null(), OPEN_EXISTING, 0, null_mut()) };
@@ -184,7 +184,7 @@ pub fn call(req: &Request) -> std::io::Result<Response> {
 /// Creates one server end. The original design let Guests and Anonymous onto its pipe;
 /// here the DACL admits only SYSTEM and Administrators, and remote clients are rejected.
 fn server_instance(first: bool) -> std::io::Result<Pipe> {
-    let sddl: Vec<u16> = "D:P(A;;GA;;;SY)(A;;GA;;;BA)\0".encode_utf16().collect();
+    let sddl = crate::wide("D:P(A;;GA;;;SY)(A;;GA;;;BA)");
     let mut sd: *mut c_void = null_mut();
     // SAFETY: on success `sd` is a LocalAlloc'd descriptor, freed below.
     if unsafe { ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl.as_ptr(), 1, &mut sd, null_mut()) } == 0 {
@@ -195,7 +195,7 @@ fn server_instance(first: bool) -> std::io::Result<Pipe> {
         lpSecurityDescriptor: sd,
         bInheritHandle: 0,
     };
-    let wide: Vec<u16> = PIPE.encode_utf16().chain([0]).collect();
+    let wide = crate::wide(PIPE);
     // First-instance ownership stops another process squatting on the pipe name.
     let open_mode = PIPE_ACCESS_DUPLEX | if first { FILE_FLAG_FIRST_PIPE_INSTANCE } else { 0 };
     // SAFETY: all pointers are valid for the call.

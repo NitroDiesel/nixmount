@@ -19,19 +19,6 @@ pub fn ftype(k: FileKind) -> u8 {
     }
 }
 
-pub fn kind_of(t: u8) -> FileKind {
-    match t {
-        1 => FileKind::File,
-        2 => FileKind::Dir,
-        3 => FileKind::CharDev,
-        4 => FileKind::BlockDev,
-        5 => FileKind::Fifo,
-        6 => FileKind::Socket,
-        7 => FileKind::Symlink,
-        _ => FileKind::Unknown,
-    }
-}
-
 /// A decoded entry.
 #[derive(Clone, Debug)]
 pub struct Ent {

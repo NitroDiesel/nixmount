@@ -201,7 +201,7 @@ impl Fs {
         check_name(name)?;
         self.check_writable_tree(dir.tree)?;
         let mut parent = self.inode_item(dir)?;
-        if kind_of_mode(parent.u32_at(O_MODE)) != FileKind::Dir {
+        if FileKind::from_mode(parent.u32_at(O_MODE)) != FileKind::Dir {
             return Err(FsError::NotDir);
         }
         if self.dir_lookup(dir, name)?.is_some() {
@@ -327,7 +327,7 @@ impl Fs {
             return Err(FsError::CrossDevice);
         }
         let mut item = self.inode_item(ino)?;
-        let kind = kind_of_mode(item.u32_at(O_MODE));
+        let kind = FileKind::from_mode(item.u32_at(O_MODE));
         if kind == FileKind::Dir {
             return Err(FsError::IsDir);
         }
@@ -435,7 +435,7 @@ impl Fs {
     fn op_write(&mut self, ino: Ino, off: u64, data: &[u8]) -> Result<usize> {
         self.check_writable_tree(ino.tree)?;
         let mut item = self.inode_item(ino)?;
-        match kind_of_mode(item.u32_at(O_MODE)) {
+        match FileKind::from_mode(item.u32_at(O_MODE)) {
             FileKind::File => {}
             FileKind::Dir => return Err(FsError::IsDir),
             _ => return Err(FsError::Invalid("not a regular file")),
@@ -453,7 +453,7 @@ impl Fs {
         self.check_writable_tree(ino.tree)?;
         let mut item = self.inode_item(ino)?;
         if let Some(size) = a.size {
-            if kind_of_mode(item.u32_at(O_MODE)) != FileKind::File {
+            if FileKind::from_mode(item.u32_at(O_MODE)) != FileKind::File {
                 return Err(FsError::Invalid("not a regular file"));
             }
             self.truncate_file(ino, &mut item, size)?;
@@ -565,7 +565,7 @@ impl Filesystem for Btrfs {
 
     fn read_dir(&self, dir: Ino, start: u64, out: &mut dyn FnMut(u64, DirEntry) -> bool) -> Result<()> {
         let f = self.read_lock()?;
-        if kind_of_mode(f.inode_item(dir)?.u32_at(O_MODE)) != FileKind::Dir {
+        if FileKind::from_mode(f.inode_item(dir)?.u32_at(O_MODE)) != FileKind::Dir {
             return Err(FsError::NotDir);
         }
         f.dir_list(dir, start, out)
@@ -574,7 +574,7 @@ impl Filesystem for Btrfs {
     fn read(&self, ino: Ino, off: u64, buf: &mut [u8]) -> Result<usize> {
         let f = self.read_lock()?;
         let item = f.inode_item(ino)?;
-        if kind_of_mode(item.u32_at(O_MODE)) == FileKind::Dir {
+        if FileKind::from_mode(item.u32_at(O_MODE)) == FileKind::Dir {
             return Err(FsError::IsDir);
         }
         f.read_file(ino, &item, off, buf)
