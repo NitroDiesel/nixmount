@@ -9,7 +9,8 @@ use crate::{human, wide};
 use fscore::{resolve, DirEntry, FileKind, Filesystem, MountOpts};
 use std::path::PathBuf;
 use std::ptr::{null, null_mut};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use std::sync::{Arc, Mutex};
 use zeroize::Zeroizing;
 use windows_sys::Win32::Foundation::*;
 use windows_sys::Win32::Graphics::Dwm::*;
@@ -31,6 +32,10 @@ const ID_PASS: usize = 100;
 const TIMER_STATUS: usize = 1;
 const TIMER_POLL: usize = 2;
 const WM_MOUSELEAVE: u32 = 0x02A3;
+
+/// Held while a key is worked out, so that happens one at a time: each can need gigabytes of
+/// memory, and an attempt given up on still runs to its end.
+static DERIVING: Mutex<()> = Mutex::new(());
 
 const I_DISK: &str = "\u{EDA2}";
 const I_USB: &str = "\u{E88E}";
@@ -164,8 +169,11 @@ enum Msg {
     Scrub(ScrubState),
     Browser(Box<Browser>),
     /// The outcome of unlock attempt `job`.
-    Unlocked { job: u64, result: Result<(luks::Key, Box<Volume>), String> },
+    Unlocked { job: u64, result: Unlock },
 }
+
+/// An unlocked volume's key and what the volume holds, or why it stayed locked.
+type Unlock = Result<(luks::Key, Box<Volume>), String>;
 
 /// An encrypted volume unlocked in this window. The key goes when it is locked again or the
 /// window closes, and is wiped as it goes.
@@ -206,10 +214,11 @@ struct App {
     detail_scroll: i32,
     detail_max: i32,
     unlocked: Vec<Unlocked>,
-    /// The volume being unlocked, and which attempt is the current one. One given up on
-    /// finishes in the background, and its key is wiped unused.
+    /// The volume being unlocked, and the number of the attempt whose result is wanted.
+    /// Cancelling moves the number on: an attempt left behind finishes in the background, or
+    /// never starts, and a key it finds is wiped unused.
     unlocking: Option<Target>,
-    unlock_job: u64,
+    unlock_job: Arc<AtomicU64>,
     /// The native passphrase field, where it should be this frame, and where it is.
     pass: HWND,
     pass_rect: Option<Rect>,
@@ -272,6 +281,10 @@ impl App {
     }
 
     fn invalidate(&self) {
+        // A headless render has no window, and to Windows no window means every window.
+        if self.hwnd.is_null() {
+            return;
+        }
         // SAFETY: the window is alive while `App` is.
         unsafe { InvalidateRect(self.hwnd, null(), 0) };
     }
@@ -353,19 +366,13 @@ impl App {
             return;
         }
         self.set_busy("Unlocking… this takes a few seconds");
-        self.unlock_job += 1;
+        let job = self.unlock_job.fetch_add(1, Relaxed) + 1;
         self.unlocking = Some(v.target.clone());
-        let (w, job) = (self.wnd(), self.unlock_job);
+        let (w, wanted) = (self.wnd(), self.unlock_job.clone());
         std::thread::spawn(move || {
-            let r = volumes::unlock(&v.target, pass.as_bytes()).and_then(|key| {
-                let open = volumes::describe_unlocked(&v, &key)?;
-                Ok((key, Box::new(open)))
-            });
-            let result = r.map_err(|e| match e {
-                fscore::FsError::Unsupported(s) => sentence(&s),
-                e => e.to_string(),
-            });
-            w.post(Msg::Unlocked { job, result });
+            if let Some(result) = try_unlock(&v, pass.as_bytes(), job, &wanted) {
+                w.post(Msg::Unlocked { job, result });
+            }
         });
     }
 
@@ -373,7 +380,7 @@ impl App {
     /// bounded, so it finishes on its own and its result is ignored.
     fn cancel_unlock(&mut self) {
         if self.unlocking.take().is_some() {
-            self.unlock_job += 1;
+            self.unlock_job.fetch_add(1, Relaxed);
             self.busy = None;
             self.focus_pass = true;
         }
@@ -797,7 +804,7 @@ impl App {
                 self.selected = self.selected.min(self.volumes.len().saturating_sub(1));
             }
             Msg::Unlocked { job, result } => {
-                if job != self.unlock_job {
+                if job != self.unlock_job.load(Relaxed) {
                     return;
                 }
                 self.unlocking = None;
@@ -1604,10 +1611,28 @@ impl App {
                 let i = if vk == VK_UP { (self.selected + n - 1) % n } else { (self.selected + 1) % n };
                 self.act(Act::Select(i));
             }
+            VK_ESCAPE if self.unlocking.is_some() => self.act(Act::CancelUnlock),
             VK_ESCAPE if self.browser.is_some() => self.act(Act::CloseBrowser),
             _ => {}
         }
     }
+}
+
+/// Works out the key of `v` from its passphrase and reads what the volume holds, as attempt
+/// `job`. Attempts take turns, and one given up on before its turn comes never starts.
+fn try_unlock(v: &Volume, passphrase: &[u8], job: u64, wanted: &AtomicU64) -> Option<Unlock> {
+    let _turn = DERIVING.lock().unwrap_or_else(|e| e.into_inner());
+    if wanted.load(Relaxed) != job {
+        return None;
+    }
+    let r = volumes::unlock(&v.target, passphrase).and_then(|key| {
+        let open = volumes::describe_unlocked(v, &key)?;
+        Ok((key, Box::new(open)))
+    });
+    Some(r.map_err(|e| match e {
+        fscore::FsError::Unsupported(s) => sentence(&s),
+        e => e.to_string(),
+    }))
 }
 
 /// Reads the browser's current directory: folders first, then by name.
@@ -1819,7 +1844,8 @@ fn passphrase_field(parent: HWND, inst: HINSTANCE) -> HWND {
     }
 }
 
-/// Enter unlocks, Escape clears, and Tab hands the keyboard back to the window.
+/// Enter unlocks, Escape clears the field and gives up an unlock in progress, and Tab hands
+/// the keyboard back to the window.
 unsafe extern "system" fn pass_keys(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM, _: usize, _: usize) -> LRESULT {
     // SAFETY: `h` is the live field; its parent is the main window.
     unsafe {
@@ -1830,6 +1856,7 @@ unsafe extern "system" fn pass_keys(h: HWND, msg: u32, wp: WPARAM, lp: LPARAM, _
             }
             (WM_KEYDOWN, VK_ESCAPE) => {
                 SetWindowTextW(h, [0u16].as_ptr());
+                PostMessageW(GetParent(h), WM_KEYDOWN, VK_ESCAPE as WPARAM, 0);
                 0
             }
             (WM_KEYDOWN, VK_TAB) => {
@@ -1916,7 +1943,7 @@ pub fn run() {
             detail_max: 0,
             unlocked: vec![],
             unlocking: None,
-            unlock_job: 0,
+            unlock_job: Arc::default(),
             pass,
             pass_rect: None,
             pass_at: None,
@@ -1939,6 +1966,13 @@ pub fn run() {
 
 /// Renders the interface with sample data to a BMP, to check the design headlessly.
 pub fn screenshot(path: &std::path::Path, dark: bool, scene: &str, width: i32, height: i32, scale: f32) {
+    let mut a = staged(dark, scene, width, height, scale);
+    a.paint();
+    let _ = a.canvas.save_bmp(path);
+}
+
+/// The interface with no window behind it, showing sample data for `scene`.
+fn staged(dark: bool, scene: &str, width: i32, height: i32, scale: f32) -> App {
     let sample = |label: &str, kind: &str, size: u64, used: u64, removable: bool, feats: &[&str]| {
         let target = Target::Partition { disk: 1, part: label.len() as u32 };
         let mut v = Volume::new(target, "Disk 1 · Partition 2".into(), "SanDisk Extreme Pro".into(), size, kind.into());
@@ -2020,7 +2054,7 @@ pub fn screenshot(path: &std::path::Path, dark: bool, scene: &str, width: i32, h
     });
     let n = volumes.len();
     let unlocking = (scene == "unlocking").then(|| volumes[0].target.clone());
-    let mut a = App {
+    App {
         hwnd,
         canvas: Canvas::new((width as f32 * scale) as i32, (height as f32 * scale) as i32, scale),
         dark,
@@ -2053,13 +2087,98 @@ pub fn screenshot(path: &std::path::Path, dark: bool, scene: &str, width: i32, h
         detail_max: 0,
         unlocked: vec![],
         unlocking,
-        unlock_job: 0,
+        unlock_job: Arc::default(),
         pass: null_mut(),
         pass_rect: None,
         pass_at: None,
         pass_brush: None,
         focus_pass: false,
-    };
-    a.paint();
-    let _ = a.canvas.save_bmp(path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The window as it is while the first volume is being unlocked, painted once.
+    fn unlocking() -> App {
+        let mut a = staged(true, "unlocking", 1000, 640, 1.0);
+        a.paint();
+        a
+    }
+
+    fn offers(a: &App, act: Act) -> bool {
+        a.regions.iter().any(|r| r.act == act)
+    }
+
+    /// What the worker sends when attempt `job` finds the key.
+    fn found(a: &App, job: u64) -> Msg {
+        let mut open = a.volumes[0].clone();
+        open.locked = false;
+        Msg::Unlocked { job, result: Ok((luks::Key::from_bytes(vec![7; 64]), Box::new(open))) }
+    }
+
+    #[test]
+    fn cancel_gives_the_window_back_and_drops_a_late_key() {
+        let mut a = unlocking();
+        let job = a.unlock_job.load(Relaxed);
+        // While unlocking, Cancel stands where Unlock was.
+        assert!(offers(&a, Act::CancelUnlock) && !offers(&a, Act::Unlock));
+        let r = a.regions.iter().find(|r| r.act == Act::CancelUnlock).unwrap().rect;
+        let clicked = a.hit(r.x + r.w / 2, r.y + r.h / 2).map(|r| r.act.clone()).unwrap();
+        a.act(clicked);
+        assert!(a.busy.is_none() && a.unlocking.is_none() && a.focus_pass);
+        a.paint();
+        assert!(offers(&a, Act::Unlock) && !offers(&a, Act::CancelUnlock));
+        // The attempt left behind finishes anyway. Its key is not kept.
+        let late = found(&a, job);
+        a.receive(late);
+        assert!(a.volumes[0].locked && a.unlocked.is_empty() && a.banner.is_none());
+    }
+
+    #[test]
+    fn escape_cancels_too() {
+        let mut a = unlocking();
+        a.key(VK_ESCAPE);
+        assert!(a.busy.is_none() && a.unlocking.is_none());
+    }
+
+    #[test]
+    fn an_unlock_that_was_waited_for_is_kept() {
+        let mut a = unlocking();
+        let job = a.unlock_job.load(Relaxed);
+        let done = found(&a, job);
+        a.receive(done);
+        assert!(!a.volumes[0].locked && a.unlocked.len() == 1 && a.busy.is_none() && a.unlocking.is_none());
+
+        let mut a = unlocking();
+        a.receive(Msg::Unlocked { job, result: Err("That passphrase doesn't unlock this volume".into()) });
+        assert!(a.volumes[0].locked && a.unlocked.is_empty() && a.busy.is_none());
+        assert!(a.banner.as_ref().is_some_and(|b| b.0) && a.focus_pass);
+    }
+
+    /// The whole way from a passphrase to an open volume in the list, on an image cryptsetup made.
+    #[test]
+    fn a_real_volume_unlocks_only_for_the_attempt_still_wanted() {
+        use std::io::Read;
+        let packed = std::fs::File::open(concat!(env!("CARGO_MANIFEST_DIR"), "/../tests/fixtures/luks2-btrfs.img.gz")).unwrap();
+        let mut image = vec![];
+        flate2::read::GzDecoder::new(packed).read_to_end(&mut image).unwrap();
+        let path = std::env::temp_dir().join(format!("nixmount-gui-{}.img", std::process::id()));
+        std::fs::write(&path, image).unwrap();
+        let locked = volumes::describe_image(&path);
+        assert!(locked.locked && locked.error.is_none());
+
+        let mut a = unlocking();
+        a.volumes[0] = locked.clone();
+        a.unlocking = Some(locked.target.clone());
+        let wanted = a.unlock_job.clone();
+        wanted.store(2, Relaxed);
+        assert!(try_unlock(&locked, b"nixmount", 1, &wanted).is_none(), "an attempt given up on still ran");
+        assert!(try_unlock(&locked, b"not it", 2, &wanted).unwrap().is_err());
+        let result = try_unlock(&locked, b"nixmount", 2, &wanted).unwrap();
+        a.receive(Msg::Unlocked { job: 2, result });
+        assert!(!a.volumes[0].locked && a.volumes[0].kind == "btrfs" && a.key_of(&locked.target).is_some());
+        std::fs::remove_file(&path).unwrap();
+    }
 }

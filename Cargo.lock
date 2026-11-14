@@ -414,6 +414,7 @@ dependencies = [
  "btrfs",
  "embed-resource",
  "ext4",
+ "flate2",
  "fscore",
  "luks",
  "serde",

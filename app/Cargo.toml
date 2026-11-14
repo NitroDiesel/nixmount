@@ -47,3 +47,6 @@ features = [
 
 [build-dependencies]
 embed-resource = "3"
+
+[dev-dependencies]
+flate2 = "1"

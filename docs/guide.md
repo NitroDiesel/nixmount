@@ -42,7 +42,7 @@ then mounts and browses like any other volume. **Lock** forgets the key, and so 
 window. A mounted volume keeps its key until it is unmounted.
 
 Unlocking takes a few seconds: LUKS makes each passphrase guess deliberately slow. Select
-**Cancel** to stop waiting and do something else. The
+**Cancel** or press Escape to stop waiting and do something else. The
 passphrase is only used to unlock and is never saved, which is also why encrypted volumes can't
 mount automatically. Type the same characters you type at Linux's prompt. If Linux uses a
 different keyboard layout, a key may produce another character on Windows.
