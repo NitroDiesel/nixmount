@@ -3,9 +3,14 @@
 1 ICON "nixmount.ico"
 1 24 "app.manifest"
 
+// The build passes the package version in, so a file's properties show the release it is.
+#define TEXT2(x) #x
+#define TEXT(x) TEXT2(x)
+#define VERSION TEXT(V_MAJOR) "." TEXT(V_MINOR) "." TEXT(V_PATCH)
+
 VS_VERSION_INFO VERSIONINFO
-FILEVERSION 0,1,0,0
-PRODUCTVERSION 0,1,0,0
+FILEVERSION V_MAJOR,V_MINOR,V_PATCH,0
+PRODUCTVERSION V_MAJOR,V_MINOR,V_PATCH,0
 FILEOS VOS_NT_WINDOWS32
 FILETYPE VFT_APP
 BEGIN
@@ -15,8 +20,8 @@ BEGIN
     BEGIN
       VALUE "FileDescription", "NixMount"
       VALUE "ProductName", "NixMount"
-      VALUE "FileVersion", "0.1.0"
-      VALUE "ProductVersion", "0.1.0"
+      VALUE "FileVersion", VERSION
+      VALUE "ProductVersion", VERSION
       VALUE "LegalCopyright", "GPL-2.0-only"
     END
   END

@@ -48,6 +48,7 @@ try {
 
     Run $New install
     Check "the installed version is now $version" ((Get-ItemProperty $arp).DisplayVersion -eq $version)
+    Check "the program file says it is $version" ((Get-Item $New).VersionInfo.ProductVersion -eq $version)
     Check 'settings came through unchanged' ($before -eq (Get-Content $settings -Raw))
     Check 'nothing is left where older versions kept settings' (-not (Test-Path (Split-Path $oldSettings)))
     Check 'the service is running' ((Get-Service NixMount).Status -eq 'Running')
