@@ -181,7 +181,7 @@ fn gpt(dev: &dyn BlockDev, sector: u64) -> Option<Vec<Partition>> {
             continue;
         }
         let name: Vec<u16> =
-            e[56..128].chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).take_while(|c| *c != 0).collect();
+            e[56..128].as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes(*c)).take_while(|c| *c != 0).collect();
         out.push(Partition {
             index: i as u32 + 1,
             start: first.checked_mul(sector)?,

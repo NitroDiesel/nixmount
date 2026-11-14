@@ -248,7 +248,7 @@ fn load(b: &[u8]) -> u128 {
 
 fn cbc_encrypt(aes: &Aes, iv: u128, sector: &mut [u8]) {
     let mut prev = iv;
-    for chunk in sector.chunks_exact_mut(16) {
+    for chunk in sector.as_chunks_mut::<16>().0 {
         let mut b = Block::from((load(chunk) ^ prev).to_le_bytes());
         aes.encrypt(std::slice::from_mut(&mut b));
         chunk.copy_from_slice(&b);
@@ -263,7 +263,7 @@ fn cbc_decrypt(aes: &Aes, iv: u128, sector: &mut [u8]) {
     let mut batch = [Block::default(); BATCH];
     for chunk in sector.chunks_mut(16 * BATCH) {
         let n = chunk.len() / 16;
-        for (b, src) in batch.iter_mut().zip(chunk.chunks_exact(16)) {
+        for (b, src) in batch.iter_mut().zip(chunk.as_chunks::<16>().0) {
             b.copy_from_slice(src);
         }
         let last = load(&chunk[(n - 1) * 16..n * 16]);
@@ -304,9 +304,9 @@ impl Xts {
         let mut batch = [Block::default(); BATCH];
         for chunk in sector.chunks_mut(16 * BATCH) {
             let n = chunk.len() / 16;
-            for (i, (b, src)) in batch.iter_mut().zip(chunk.chunks_exact(16)).enumerate() {
+            for (i, (b, src)) in batch.iter_mut().zip(chunk.as_chunks::<16>().0).enumerate() {
                 tweaks[i] = tweak;
-                let x = u128::from_le_bytes(src.try_into().unwrap_or_default()) ^ tweak;
+                let x = u128::from_le_bytes(*src) ^ tweak;
                 b.copy_from_slice(&x.to_le_bytes());
                 // Multiplying by x in GF(2^128), reduced by its polynomial.
                 tweak = (tweak << 1) ^ if tweak >> 127 == 1 { 0x87 } else { 0 };
@@ -316,7 +316,7 @@ impl Xts {
             } else {
                 self.data.decrypt(&mut batch[..n]);
             }
-            for (i, (b, dst)) in batch.iter().zip(chunk.chunks_exact_mut(16)).enumerate() {
+            for (i, (b, dst)) in batch.iter().zip(chunk.as_chunks_mut::<16>().0).enumerate() {
                 let x = u128::from_le_bytes((*b).into()) ^ tweaks[i];
                 dst.copy_from_slice(&x.to_le_bytes());
             }

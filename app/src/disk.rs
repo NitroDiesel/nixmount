@@ -128,7 +128,7 @@ impl RawDev {
     }
 
     fn aligned(&self, off: u64, n: usize) -> bool {
-        off % self.sector == 0 && n as u64 % self.sector == 0
+        off.is_multiple_of(self.sector) && (n as u64).is_multiple_of(self.sector)
     }
 
     fn span(&self, off: u64, n: usize) -> (u64, usize) {

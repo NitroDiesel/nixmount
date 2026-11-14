@@ -397,7 +397,7 @@ fn find_run(bm: &[u8], from: usize, end: usize, want: usize) -> Option<(usize, u
     let mut best: Option<(usize, usize)> = None;
     let mut i = from;
     while i < end {
-        if bm[i / 8] == 0xFF && i % 8 == 0 {
+        if bm[i / 8] == 0xFF && i.is_multiple_of(8) {
             i += 8;
             continue;
         }

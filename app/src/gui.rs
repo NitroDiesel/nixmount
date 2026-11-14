@@ -1244,7 +1244,7 @@ impl App {
         // Live state of a verification pass.
         if let Some(s) = self.scrub.clone() {
             let text = if s.running {
-                let pct = if s.total > 0 { s.done * 100 / s.total } else { 0 };
+                let pct = (s.done * 100).checked_div(s.total).unwrap_or(0);
                 format!("Verifying… {pct}%")
             } else if s.errors.is_empty() {
                 format!("All good: {} verified, {} repaired", human(s.scanned_bytes), s.repaired)
@@ -1822,12 +1822,12 @@ pub fn run() {
             cbClsExtra: 0,
             cbWndExtra: 0,
             hInstance: inst,
-            hIcon: LoadIconW(inst, 1 as *const u16),
+            hIcon: LoadIconW(inst, std::ptr::without_provenance(1)),
             hCursor: LoadCursorW(null_mut(), IDC_ARROW),
             hbrBackground: null_mut(),
             lpszMenuName: null(),
             lpszClassName: class.as_ptr(),
-            hIconSm: LoadIconW(inst, 1 as *const u16),
+            hIconSm: LoadIconW(inst, std::ptr::without_provenance(1)),
         };
         RegisterClassExW(&wc);
         let title = wide("NixMount");

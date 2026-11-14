@@ -124,7 +124,7 @@ impl Fs {
     }
 
     /// Releases an inode whose last link is gone.
-    pub fn drop_inode(&mut self, ino: u32, raw: &mut Vec<u8>) -> Result<()> {
+    pub fn drop_inode(&mut self, ino: u32, raw: &mut [u8]) -> Result<()> {
         let is_dir = raw.is_dir();
         let has_blocks = raw.kind() != FileKind::Symlink || self.i_blocks(raw) > 0;
         if has_blocks && raw.flags() & F_INLINE == 0 {
@@ -171,7 +171,7 @@ impl Fs {
         self.dec_link(e.ino, &mut raw)
     }
 
-    fn dec_link(&mut self, ino: u32, raw: &mut Vec<u8>) -> Result<()> {
+    fn dec_link(&mut self, ino: u32, raw: &mut [u8]) -> Result<()> {
         if raw.links() <= 1 {
             return self.drop_inode(ino, raw);
         }
@@ -365,7 +365,7 @@ impl Fs {
                     Ok(n) => rep.scanned_bytes += n,
                     Err(e) => rep.errors.push(format!("inode {ino}: {e}")),
                 }
-                if ino % 4096 == 0 {
+                if ino.is_multiple_of(4096) {
                     progress(ino as u64, total);
                 }
             }

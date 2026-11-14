@@ -62,7 +62,7 @@ impl Fs {
         while o + 8 <= end {
             let rec = rec_len(b, o);
             let n = self.name_len(b, o);
-            if rec < 8 || rec % 4 != 0 || o + rec > end || 8 + n > rec {
+            if rec < 8 || !rec.is_multiple_of(4) || o + rec > end || 8 + n > rec {
                 return corrupt("malformed directory entry");
             }
             let ino = b.u32_at(o);
@@ -366,7 +366,7 @@ impl Fs {
     }
 
     /// Adds a block to a directory, formatted as one empty record.
-    fn dir_grow(&mut self, dir: u32, raw: &mut Vec<u8>) -> Result<(u32, u64)> {
+    fn dir_grow(&mut self, dir: u32, raw: &mut [u8]) -> Result<(u32, u64)> {
         let lblk = self.dir_blocks(raw);
         let p = self.alloc_file_block(dir, raw, lblk)?;
         let mut b = vec![0u8; self.g.bs];
@@ -427,7 +427,7 @@ impl Fs {
     }
 
     /// Converts a full single-block directory into an htree.
-    fn make_indexed(&mut self, dir: u32, raw: &mut Vec<u8>) -> Result<()> {
+    fn make_indexed(&mut self, dir: u32, raw: &mut [u8]) -> Result<()> {
         let gen = raw.generation();
         let p0 = self.dir_phys(dir, raw, 0)?;
         let b = self.block(p0)?;
@@ -481,7 +481,7 @@ impl Fs {
         corrupt("directory leaf could not be split")
     }
 
-    fn split_leaf(&mut self, dir: u32, raw: &mut Vec<u8>, p: u64, end: usize) -> Result<(u32, u32)> {
+    fn split_leaf(&mut self, dir: u32, raw: &mut [u8], p: u64, end: usize) -> Result<(u32, u32)> {
         let gen = raw.generation();
         let version = self.hash_version(dir, raw)?;
         let b = self.block(p)?;
@@ -580,7 +580,7 @@ impl Fs {
         Ok(())
     }
 
-    fn dir_grow_node(&mut self, dir: u32, raw: &mut Vec<u8>, count: usize) -> Result<(u32, u64)> {
+    fn dir_grow_node(&mut self, dir: u32, raw: &mut [u8], count: usize) -> Result<(u32, u64)> {
         let (lblk, p) = self.dir_grow(dir, raw)?;
         let limit = self.dx_limit(false);
         let bs = self.g.bs;
@@ -654,7 +654,7 @@ impl Fs {
     }
 
     /// Fills the first block of a new directory.
-    pub fn dir_init(&mut self, dir: u32, raw: &mut Vec<u8>, parent: u32) -> Result<()> {
+    pub fn dir_init(&mut self, dir: u32, raw: &mut [u8], parent: u32) -> Result<()> {
         let (_, p) = self.dir_grow(dir, raw)?;
         let mut b = self.block(p)?.to_vec();
         let end = self.usable();

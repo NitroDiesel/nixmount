@@ -276,7 +276,7 @@ impl Fs {
     }
 
     /// An inline extent can't coexist with others: rewrite it as a regular one.
-    fn uninline(&mut self, ino: Ino, item: &mut Vec<u8>) -> Result<()> {
+    fn uninline(&mut self, ino: Ino, item: &mut [u8]) -> Result<()> {
         let root = self.tree(ino.tree)?;
         let key = Key::new(ino.id, K_EXTENT_DATA, 0);
         let Some(d) = self.get(root, key)? else { return Ok(()) };
@@ -316,7 +316,7 @@ impl Fs {
     }
 
     /// Copy-on-write of an aligned range. `data` is padded to whole sectors by the caller.
-    fn write_range(&mut self, ino: Ino, item: &mut Vec<u8>, off: u64, data: &[u8]) -> Result<()> {
+    fn write_range(&mut self, ino: Ino, item: &mut [u8], off: u64, data: &[u8]) -> Result<()> {
         let ss = self.sectorsize as u64;
         let nosum = item.u64_at(O_FLAGS) & NODATASUM != 0;
         let padded = (data.len() as u64).div_ceil(ss) * ss;
@@ -355,7 +355,7 @@ impl Fs {
     }
 
     /// Writes `data` at `off`, merging partial first and last sectors with existing bytes.
-    pub fn write_file(&mut self, ino: Ino, item: &mut Vec<u8>, off: u64, data: &[u8]) -> Result<()> {
+    pub fn write_file(&mut self, ino: Ino, item: &mut [u8], off: u64, data: &[u8]) -> Result<()> {
         self.uninline(ino, item)?;
         let ss = self.sectorsize as u64;
         let size = item.u64_at(O_SIZE);
@@ -388,7 +388,7 @@ impl Fs {
     }
 
     /// Changes a file's size.
-    pub fn truncate_file(&mut self, ino: Ino, item: &mut Vec<u8>, size: u64) -> Result<()> {
+    pub fn truncate_file(&mut self, ino: Ino, item: &mut [u8], size: u64) -> Result<()> {
         let old = item.u64_at(O_SIZE);
         if size == old {
             return Ok(());

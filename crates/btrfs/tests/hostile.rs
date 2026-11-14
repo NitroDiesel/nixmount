@@ -36,9 +36,9 @@ fn survives_bit_rot() {
             let mut img = base.clone();
             for _ in 0..1 + rng.below(30) {
                 let at = 0x10000 + rng.below(4096) as usize;
-                img[at] = rng.next() as u8;
+                img[at] = rng.next_u64() as u8;
                 let at = rng.below(img.len() as u64) as usize;
-                img[at] = rng.next() as u8;
+                img[at] = rng.next_u64() as u8;
             }
             if let Ok(fs) = open(img, round % 2 == 0) {
                 let _ = fs.info();
@@ -70,7 +70,7 @@ fn survives_forged_checksums() {
                 for _ in 0..1 + rng.below(6) {
                     // Headers and the item table first: that is where the structure lives.
                     let span = if rng.below(3) == 0 { node - 0x30 } else { 512 };
-                    img[o + 0x30 + rng.below(span as u64) as usize] = rng.next() as u8;
+                    img[o + 0x30 + rng.below(span as u64) as usize] = rng.next_u64() as u8;
                 }
                 let c = crc32c::crc32c(&img[o + 0x20..o + node]);
                 img[o..o + 4].copy_from_slice(&c.to_le_bytes());

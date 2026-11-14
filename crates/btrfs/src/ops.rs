@@ -269,7 +269,7 @@ impl Fs {
         Ok(link)
     }
 
-    fn dec_link(&mut self, ino: Ino, item: &mut Vec<u8>) -> Result<()> {
+    fn dec_link(&mut self, ino: Ino, item: &mut [u8]) -> Result<()> {
         let links = item.u32_at(O_NLINK);
         if links <= 1 {
             return self.drop_inode(ino, item);

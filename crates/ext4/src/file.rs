@@ -76,7 +76,7 @@ impl Fs {
     }
 
     /// Allocates and maps up to `want` blocks at `lblk` (a hole). Returns (phys, count).
-    fn alloc_file(&mut self, ino: u32, raw: &mut Vec<u8>, lblk: u64, want: u64) -> Result<(u64, u32)> {
+    fn alloc_file(&mut self, ino: u32, raw: &mut [u8], lblk: u64, want: u64) -> Result<(u64, u32)> {
         let goal = self.goal(ino, raw, lblk);
         if raw.flags() & F_EXTENTS != 0 {
             let (p, n) = self.alloc_blocks(goal, want.min(u32::MAX as u64) as u32)?;
@@ -109,14 +109,14 @@ impl Fs {
     }
 
     /// Maps a single new block and returns it.
-    pub fn alloc_file_block(&mut self, ino: u32, raw: &mut Vec<u8>, lblk: u64) -> Result<u64> {
+    pub fn alloc_file_block(&mut self, ino: u32, raw: &mut [u8], lblk: u64) -> Result<u64> {
         Ok(self.alloc_file(ino, raw, lblk, 1)?.0)
     }
 
     /// Writes `data` at `off`, allocating as needed. Data goes straight to its final
     /// location, ahead of the commit that publishes the metadata (ordered mode).
     /// Returns bytes written; a short count means the volume filled up part way.
-    pub fn write_data(&mut self, ino: u32, raw: &mut Vec<u8>, off: u64, data: &[u8]) -> Result<usize> {
+    pub fn write_data(&mut self, ino: u32, raw: &mut [u8], off: u64, data: &[u8]) -> Result<usize> {
         let bs = self.g.bs as u64;
         let max = if raw.flags() & F_EXTENTS != 0 { (1u64 << 32) * bs } else { self.ind_limit() };
         if off.checked_add(data.len() as u64).is_none_or(|e| e > max) {
@@ -175,7 +175,7 @@ impl Fs {
         let bs = self.g.bs;
         self.check_block(phys)?;
         let base = phys * bs as u64;
-        if in_blk == 0 && data.len() % bs == 0 {
+        if in_blk == 0 && data.len().is_multiple_of(bs) {
             return self.dev.write_at(base, data);
         }
         let total = (in_blk + data.len()).div_ceil(bs) * bs;
@@ -184,7 +184,7 @@ impl Fs {
         let mut at = in_blk;
         while !head.is_empty() {
             let n = head.len().min(bs - at % bs);
-            if at % bs == 0 && n == bs {
+            if at.is_multiple_of(bs) && n == bs {
                 let whole = head.len() / bs * bs;
                 self.dev.write_at(base + at as u64, &head[..whole])?;
                 head = &head[whole..];
@@ -222,7 +222,7 @@ impl Fs {
     }
 
     /// Sets the file size, releasing blocks when shrinking.
-    pub fn truncate_to(&mut self, ino: u32, raw: &mut Vec<u8>, size: u64) -> Result<()> {
+    pub fn truncate_to(&mut self, ino: u32, raw: &mut [u8], size: u64) -> Result<()> {
         let bs = self.g.bs as u64;
         let old = raw.size();
         if size < old {

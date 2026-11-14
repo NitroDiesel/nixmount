@@ -19,7 +19,7 @@ use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF
 type Ntstatus = i32;
 type Pwstr = *const u16;
 type Fsp = *mut c_void;
-type BOOLEAN = u8;
+type Boolean = u8;
 
 const STATUS_SUCCESS: Ntstatus = 0;
 const STATUS_REPARSE: Ntstatus = 0x104;
@@ -98,7 +98,7 @@ struct DirInfoHeader {
 }
 
 type GetReparseByName =
-    unsafe extern "system" fn(Fsp, *mut c_void, Pwstr, BOOLEAN, *mut c_void, *mut usize) -> Ntstatus;
+    unsafe extern "system" fn(Fsp, *mut c_void, Pwstr, Boolean, *mut c_void, *mut usize) -> Ntstatus;
 
 /// The entry points used from `winfsp-x64.dll`.
 struct Api {
@@ -107,15 +107,15 @@ struct Api {
     set_mount_point: unsafe extern "system" fn(Fsp, Pwstr) -> Ntstatus,
     start: unsafe extern "system" fn(Fsp, u32) -> Ntstatus,
     stop: unsafe extern "system" fn(Fsp),
-    add_dir_info: unsafe extern "system" fn(*mut DirInfoHeader, *mut c_void, u32, *mut u32) -> BOOLEAN,
-    find_reparse: unsafe extern "system" fn(Fsp, GetReparseByName, *mut c_void, Pwstr, *mut u32) -> BOOLEAN,
+    add_dir_info: unsafe extern "system" fn(*mut DirInfoHeader, *mut c_void, u32, *mut u32) -> Boolean,
+    find_reparse: unsafe extern "system" fn(Fsp, GetReparseByName, *mut c_void, Pwstr, *mut u32) -> Boolean,
     resolve_reparse: unsafe extern "system" fn(
         Fsp,
         GetReparseByName,
         *mut c_void,
         Pwstr,
         u32,
-        BOOLEAN,
+        Boolean,
         *mut c_void,
         *mut c_void,
         *mut usize,
@@ -161,6 +161,8 @@ fn api() -> Result<&'static Api, String> {
     API.get_or_init(load).as_ref().map_err(Clone::clone)
 }
 
+// What each symbol is turned into is the type of the `Api` field it fills, declared above.
+#[allow(clippy::missing_transmute_annotations)]
 fn load() -> Result<Api, String> {
     let dir = install_dir().ok_or("WinFsp is not installed")?;
     let dll = dir.join("bin").join("winfsp-x64.dll");
@@ -475,7 +477,7 @@ unsafe extern "system" fn get_reparse_by_name(
     fs: Fsp,
     _ctx: *mut c_void,
     name: Pwstr,
-    _is_dir: BOOLEAN,
+    _is_dir: Boolean,
     buffer: *mut c_void,
     size: *mut usize,
 ) -> Ntstatus {
@@ -622,7 +624,7 @@ unsafe extern "system" fn overwrite(
     fs: Fsp,
     ctx: *mut c_void,
     _attrs: u32,
-    _replace: BOOLEAN,
+    _replace: Boolean,
     _alloc: u64,
     info: *mut FileInfo,
 ) -> Ntstatus {
@@ -689,8 +691,8 @@ unsafe extern "system" fn write(
     buffer: *const u8,
     offset: u64,
     length: u32,
-    to_end: BOOLEAN,
-    constrained: BOOLEAN,
+    to_end: Boolean,
+    constrained: Boolean,
     done: *mut u32,
     info: *mut FileInfo,
 ) -> Ntstatus {
@@ -785,7 +787,7 @@ unsafe extern "system" fn set_file_size(
     fs: Fsp,
     ctx: *mut c_void,
     new_size: u64,
-    allocation: BOOLEAN,
+    allocation: Boolean,
     info: *mut FileInfo,
 ) -> Ntstatus {
     guard(|| {
@@ -836,7 +838,7 @@ unsafe extern "system" fn can_delete(fs: Fsp, ctx: *mut c_void, _name: Pwstr) ->
     })
 }
 
-unsafe extern "system" fn rename(fs: Fsp, _ctx: *mut c_void, name: Pwstr, new_name: Pwstr, replace: BOOLEAN) -> Ntstatus {
+unsafe extern "system" fn rename(fs: Fsp, _ctx: *mut c_void, name: Pwstr, new_name: Pwstr, replace: Boolean) -> Ntstatus {
     guard(|| {
         let h = host(fs);
         let from = h.parent_and_name(wstr(name));
@@ -936,7 +938,7 @@ unsafe extern "system" fn resolve_reparse_points(
     fs: Fsp,
     name: Pwstr,
     index: u32,
-    last: BOOLEAN,
+    last: Boolean,
     io_status: *mut c_void,
     buffer: *mut c_void,
     size: *mut usize,
@@ -984,7 +986,7 @@ unsafe extern "system" fn set_reparse_point(
         }
         let (off, len) = (20 + rd(8), rd(10));
         let Some(raw) = d.get(off..off + len) else { return STATUS_INVALID_PARAMETER };
-        let wide: Vec<u16> = raw.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+        let wide: Vec<u16> = raw.as_chunks::<2>().0.iter().map(|c| u16::from_le_bytes(*c)).collect();
         let Some(target) = names::link_from_windows(&wide, h.opts.codepage) else { return STATUS_ACCESS_DENIED };
         let (dir, leaf) = match h.parent_and_name(wstr(name)) {
             Ok(v) => v,

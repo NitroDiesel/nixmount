@@ -83,8 +83,10 @@ impl Volume {
     }
 }
 
+type Devices = Vec<Arc<dyn BlockDev>>;
+
 /// Opens every device of `target`.
-fn devices(target: &Target, write: bool) -> Result<Vec<Arc<dyn BlockDev>>> {
+fn devices(target: &Target, write: bool) -> Result<Devices> {
     match target {
         Target::Image { path, partition } => {
             let file: Arc<dyn BlockDev> = Arc::new(FileDev::open(path, write)?);
@@ -144,7 +146,7 @@ pub fn open_with_devices(
     target: &Target,
     opts: MountOpts,
     key: Option<&luks::Key>,
-) -> Result<(Arc<dyn Filesystem>, Vec<Arc<dyn BlockDev>>)> {
+) -> Result<(Arc<dyn Filesystem>, Devices)> {
     let mut devs = devices(target, opts.write)?;
     for d in &mut devs {
         if part::probe(d.as_ref()) == FsKind::Luks {
@@ -208,7 +210,9 @@ pub fn fill_from(v: &mut Volume, info: &VolumeInfo) {
 pub fn scan_disks() -> Vec<Volume> {
     let found = disk::scan();
     let mut out: Vec<Volume> = vec![];
-    let mut groups: Vec<([u8; 16], Vec<(u32, u32)>)> = vec![];
+    // The filesystem id of each multi-device Btrfs, and the partitions that belong to it.
+    type Group = ([u8; 16], Vec<(u32, u32)>);
+    let mut groups: Vec<Group> = vec![];
     for p in &found {
         if p.letter.is_some() || matches!(p.kind, FsKind::Ntfs | FsKind::Fat | FsKind::ExFat | FsKind::Unknown) {
             continue;

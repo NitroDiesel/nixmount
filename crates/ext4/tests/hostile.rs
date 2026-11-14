@@ -39,7 +39,7 @@ fn survives_bit_rot() {
             for _ in 0..1 + rng.below(40) {
                 let span = if rng.below(2) == 0 { 1 << 20 } else { img.len() as u64 };
                 let at = rng.below(span) as usize;
-                img[at] = rng.next() as u8;
+                img[at] = rng.next_u64() as u8;
             }
             let write = round % 3 == 0;
             let dev = Arc::new(MemDev::new(img));

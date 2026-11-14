@@ -39,7 +39,7 @@ pub fn parse_chunk(start: u64, b: &[u8]) -> Result<Chunk> {
     if n == 0 || b.len() < 48 + n * 32 || len == 0 || !stripe_len.is_power_of_two() || stripe_len < 4096 {
         return bad(format!("invalid chunk at {start:#x}"));
     }
-    if start.checked_add(len).is_none() || (ty & RAID10 != 0 && (sub == 0 || n as u64 % sub != 0)) {
+    if start.checked_add(len).is_none() || (ty & RAID10 != 0 && (sub == 0 || !(n as u64).is_multiple_of(sub))) {
         return bad(format!("invalid chunk at {start:#x}"));
     }
     if ty & RAID5 != 0 && n < 2 || ty & RAID6 != 0 && n < 3 {

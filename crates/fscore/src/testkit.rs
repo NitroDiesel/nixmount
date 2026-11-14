@@ -10,14 +10,14 @@ use std::sync::Mutex;
 pub struct Rng(pub u64);
 
 impl Rng {
-    pub fn next(&mut self) -> u64 {
+    pub fn next_u64(&mut self) -> u64 {
         self.0 ^= self.0 >> 12;
         self.0 ^= self.0 << 25;
         self.0 ^= self.0 >> 27;
         self.0.wrapping_mul(0x2545_F491_4F6C_DD1D)
     }
     pub fn below(&mut self, n: u64) -> u64 {
-        self.next() % n.max(1)
+        self.next_u64() % n.max(1)
     }
 }
 
@@ -215,7 +215,7 @@ fn name(r: &mut Rng) -> String {
         0 => 100 + r.below(150),
         _ => 3 + r.below(12),
     };
-    let mut s = format!("n{:x}-", r.next() & 0xFFFF);
+    let mut s = format!("n{:x}-", r.next_u64() & 0xFFFF);
     while (s.len() as u64) < len {
         s.push((b'a' + r.below(26) as u8) as char);
     }
@@ -223,7 +223,7 @@ fn name(r: &mut Rng) -> String {
 }
 
 fn bytes(r: &mut Rng, n: usize) -> Vec<u8> {
-    let seed = r.next();
+    let seed = r.next_u64();
     (0..n).map(|i| (seed.wrapping_mul(i as u64 + 1) >> 13) as u8).collect()
 }
 
