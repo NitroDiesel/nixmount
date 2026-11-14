@@ -130,6 +130,7 @@ independent judges. Each runs in CI on every push.
 | `e2fsck -fn` and `btrfs check --check-data-csum` | After thousands of random operations, on 8 ext and 11 Btrfs layouts, the tools that define correctness find nothing wrong |
 | The Linux kernel | `diff -r` between a kernel mount of each written image and the expected tree |
 | Images written by the kernel | Compressed extents in all three codecs, journals left dirty, snapshots with shared trees, and RAID5 with any one device missing |
+| A volume shaped like a real install | A block group tree, a filesystem id changed after the fact and files the kernel compressed with zstd, all then edited here and judged by `btrfs check` and the kernel |
 | The kernel's subvolume cleaner | Dropping a deleted snapshot walks every reference, auditing snapshot accounting |
 | Power-cut simulator | Replays the write log to sampled points, losing a random part of what wasn't flushed. Recovery must land exactly on a commit boundary. On ext4, read-only recovery must also match a real replay without writing a byte |
 | Reference model | Every random operation is mirrored in memory and compared with what the engine returns |
@@ -141,5 +142,23 @@ independent judges. Each runs in CI on every push.
 Run the portable subset with `cargo test`. Tests needing the Linux tools skip themselves when
 they aren't installed. `ci/kernel-check.sh`, `ci/luks-check.sh` and `ci/windows-e2e.ps1` are the
 end-to-end stages, and `ci/make-fixtures.sh` regenerates the images in `tests/fixtures`.
+
+### Rehearsing on a real volume
+
+None of that is your own volume. Before trusting one to `--rw`, the `rehearse` test in
+`app/src/rehearse.rs` tries writing on it without changing it: the disk is opened read-only,
+so Windows refuses any write, and what the engine writes is kept in memory and dropped at
+the end. It walks the whole volume, adds files, edits and deletes existing ones, takes a
+snapshot, then opens the result afresh and checks that what it wrote reads back and that
+nothing else changed. It reports counts and errors, never names. Build the test binary with
+`cargo test --release -p nixmount --no-run` and run it as administrator:
+
+```
+set NIXMOUNT_REHEARSE=1:3
+nixmount-<hash>.exe --ignored --nocapture rehearse
+```
+
+It judges the engine against itself, so it complements the judges above and doesn't replace
+them.
 
 [WinFsp]: https://winfsp.dev/rel/

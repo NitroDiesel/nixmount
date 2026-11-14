@@ -18,6 +18,8 @@ mod ipc;
 #[cfg(windows)]
 mod mounts;
 mod names;
+#[cfg(all(windows, test))]
+mod rehearse;
 #[cfg(windows)]
 mod service;
 #[cfg(windows)]
